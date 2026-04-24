@@ -45,8 +45,11 @@ public final class EngineClient: Sendable {
         try await runJSON(["status", "--json"], as: AppStatus.self)
     }
 
-    public func setup(install: Bool = false) async throws -> AppStatus {
+    public func setup(install: Bool = false, provider: String? = nil) async throws -> AppStatus {
         var args = ["setup", "--json"]
+        if let provider, !provider.isEmpty {
+            args.append(contentsOf: ["--provider", provider])
+        }
         if install {
             args.append("--yes")
         } else {
@@ -55,8 +58,13 @@ public final class EngineClient: Sendable {
         return try await runJSON(args, as: AppStatus.self)
     }
 
-    public func startNow(cwd: String) async throws -> RunResponse {
-        try await runJSON(["start-now", "--cwd", cwd, "--json"], as: RunResponse.self)
+    public func startNow(cwd: String, provider: String? = nil) async throws -> RunResponse {
+        var args = ["start-now", "--cwd", cwd]
+        if let provider, !provider.isEmpty {
+            args.append(contentsOf: ["--provider", provider])
+        }
+        args.append("--json")
+        return try await runJSON(args, as: RunResponse.self)
     }
 
     public func logs(jobID: String? = nil) async throws -> LogsResponse {
@@ -93,14 +101,14 @@ public final class EngineClient: Sendable {
 
     public static func defaultCommand() -> EngineCommand {
         let environment = ProcessInfo.processInfo.environment
-        if let override = environment["CLAUDE_SESSION_SCHEDULER_BIN"], !override.isEmpty {
+        if let override = environment["PROMPT_SCHEDULER_BIN"], !override.isEmpty {
             return EngineCommand(executable: override)
         }
 
         let candidates = [
-            "/opt/homebrew/bin/claude-session-scheduler",
-            "/usr/local/bin/claude-session-scheduler",
-            "\(NSHomeDirectory())/.local/bin/claude-session-scheduler"
+            "/opt/homebrew/bin/prompt-scheduler",
+            "/usr/local/bin/prompt-scheduler",
+            "\(NSHomeDirectory())/.local/bin/prompt-scheduler"
         ]
         for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
             return EngineCommand(executable: candidate)
@@ -115,7 +123,7 @@ public final class EngineClient: Sendable {
         let srcPath = repoRoot.appendingPathComponent("src").path
         return EngineCommand(
             executable: "/usr/bin/env",
-            arguments: ["python3", "-m", "claude_session_scheduler"],
+            arguments: ["python3", "-m", "prompt_scheduler"],
             environment: ["PYTHONPATH": srcPath]
         )
     }

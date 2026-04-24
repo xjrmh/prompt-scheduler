@@ -3,10 +3,11 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
-from claude_session_scheduler.paths import AppPaths
-from claude_session_scheduler.runner import run_job
-from claude_session_scheduler.storage import JobStore, StateStore, utc_now_iso
+from prompt_scheduler.paths import AppPaths
+from prompt_scheduler.runner import run_job
+from prompt_scheduler.storage import JobStore, StateStore, utc_now_iso
 
 
 def make_paths(tmp: str) -> AppPaths:
@@ -16,6 +17,13 @@ def make_paths(tmp: str) -> AppPaths:
 
 def write_fake_claude(directory: Path, body: str) -> Path:
     executable = directory / "claude"
+    executable.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+    executable.chmod(0o755)
+    return executable
+
+
+def write_fake_codex(directory: Path, body: str) -> Path:
+    executable = directory / "codex"
     executable.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
     executable.chmod(0o755)
     return executable
@@ -77,6 +85,52 @@ class RunnerTests(unittest.TestCase):
             started = datetime.fromisoformat(state["last_estimated_window_started_at"])
             reset = datetime.fromisoformat(state["next_estimated_reset_at"])
             self.assertEqual(reset - started, timedelta(hours=5))
+
+    def test_successful_codex_run_uses_output_last_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = make_paths(tmp)
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            args_path = Path(tmp) / "codex-args.txt"
+            fake = write_fake_codex(
+                bin_dir,
+                f"""
+if [ "$1" = "login" ]; then
+  echo 'Logged in using ChatGPT'
+  exit 0
+fi
+printf '%s\\n' "$@" > "{args_path}"
+output=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    shift
+    output="$1"
+  fi
+  shift
+done
+printf 'Codex OK\\n' > "$output"
+""",
+            )
+            job = make_job(tmp)
+            job["provider"] = "codex"
+            JobStore(paths).add(job)
+
+            result = run_job(
+                job["id"],
+                paths=paths,
+                codex_bin=str(fake),
+                cleanup_launchd=False,
+            )
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.provider, "codex")
+            self.assertEqual(result.claude_response_summary, "Codex OK")
+            updated = JobStore(paths).get(job["id"])
+            self.assertEqual(updated["last_response_summary"], "Codex OK")
+            self.assertEqual(updated["last_claude_response_summary"], "Codex OK")
+            self.assertNotIn("next_estimated_reset_at", StateStore(paths).load())
+            args = args_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(args[:3], ["--ask-for-approval", "never", "exec"])
 
     def test_usage_limit_records_reset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -189,7 +243,8 @@ exit 1
             old_path = os.environ.get("PATH", "")
             try:
                 os.environ["PATH"] = str(Path(tmp) / "empty-bin")
-                result = run_job(job["id"], paths=paths, cleanup_launchd=False)
+                with patch("prompt_scheduler.runner.find_provider_executable", return_value=None):
+                    result = run_job(job["id"], paths=paths, cleanup_launchd=False)
             finally:
                 os.environ["PATH"] = old_path
             self.assertEqual(result.status, "failed")

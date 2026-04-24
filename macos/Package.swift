@@ -3,25 +3,25 @@
 import PackageDescription
 
 let package = Package(
-    name: "ClaudeSessionSchedulerMac",
+    name: "PromptSchedulerMac",
     platforms: [.macOS(.v14)],
     products: [
-        .library(name: "CSSShared", targets: ["CSSShared"]),
-        .executable(name: "ClaudeSessionSchedulerUI", targets: ["ClaudeSessionSchedulerUI"])
+        .library(name: "PromptSchedulerShared", targets: ["PromptSchedulerShared"]),
+        .executable(name: "PromptSchedulerUI", targets: ["PromptSchedulerUI"])
     ],
     targets: [
-        .target(name: "CSSShared"),
+        .target(name: "PromptSchedulerShared"),
         .executableTarget(
-            name: "ClaudeSessionSchedulerUI",
-            dependencies: ["CSSShared"],
+            name: "PromptSchedulerUI",
+            dependencies: ["PromptSchedulerShared"],
             resources: [
                 .copy("Resources/AppLogo.png"),
                 .copy("Resources/AppIcon.icns")
             ]
         ),
         .testTarget(
-            name: "CSSSharedTests",
-            dependencies: ["CSSShared"]
+            name: "PromptSchedulerSharedTests",
+            dependencies: ["PromptSchedulerShared"]
         )
     ]
 )

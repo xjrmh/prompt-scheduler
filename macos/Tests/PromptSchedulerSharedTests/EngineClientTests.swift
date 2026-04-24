@@ -1,11 +1,29 @@
 import XCTest
-@testable import CSSShared
+@testable import PromptSchedulerShared
 
 final class EngineClientTests: XCTestCase {
     func testDecodesStatusJSON() throws {
         let data = """
         {
           "ok": true,
+          "active_provider": "codex",
+          "active_provider_label": "Codex",
+          "providers": {
+            "claude": {
+              "available": true,
+              "path": "/usr/local/bin/claude",
+              "authenticated": true,
+              "auth_method": "claude.ai",
+              "label": "Claude Code"
+            },
+            "codex": {
+              "available": true,
+              "path": "/usr/local/bin/codex",
+              "authenticated": true,
+              "auth_method": "ChatGPT",
+              "label": "Codex"
+            }
+          },
           "claude": {
             "available": true,
             "path": "/usr/local/bin/claude",
@@ -30,9 +48,12 @@ final class EngineClientTests: XCTestCase {
               "id": "job-1234",
               "name": "Morning",
               "cwd": "/tmp/project",
+              "provider": "codex",
+              "provider_label": "Codex",
               "schedule": {"type": "daily", "time": "09:00"},
               "schedule_label": "daily at 09:00",
               "status": "scheduled",
+              "last_response_summary": "OK",
               "last_claude_response_summary": "OK",
               "run_count": 0
             }
@@ -54,6 +75,9 @@ final class EngineClientTests: XCTestCase {
         let status = try JSONDecoder().decode(AppStatus.self, from: data)
 
         XCTAssertTrue(status.ok)
+        XCTAssertEqual(status.activeProvider, "codex")
+        XCTAssertEqual(status.activeProviderLabel, "Codex")
+        XCTAssertTrue(status.providers?["codex"]?.available == true)
         XCTAssertTrue(status.claude.available)
         XCTAssertTrue(status.claude.authenticated == true)
         XCTAssertEqual(status.claude.authMethod, "claude.ai")
@@ -61,6 +85,8 @@ final class EngineClientTests: XCTestCase {
         XCTAssertEqual(status.reset.rateLimits?.fiveHour?.usedPercentage, 41.8)
         XCTAssertEqual(status.reset.rateLimits?.fiveHour?.resetsAtIso, "2026-04-25T09:00:00-04:00")
         XCTAssertEqual(status.jobs.first?.scheduleLabel, "daily at 09:00")
+        XCTAssertEqual(status.jobs.first?.provider, "codex")
+        XCTAssertEqual(status.jobs.first?.lastResponseSummary, "OK")
         XCTAssertEqual(status.jobs.first?.lastClaudeResponseSummary, "OK")
         XCTAssertEqual(status.paths.launchAgents, "/tmp/agents")
     }
@@ -68,10 +94,10 @@ final class EngineClientTests: XCTestCase {
     func testBuildsStartNowCommand() async throws {
         let client = EngineClient(
             commandResolver: {
-                EngineCommand(executable: "/usr/local/bin/claude-session-scheduler")
+                EngineCommand(executable: "/usr/local/bin/prompt-scheduler")
             },
             runProcess: { command in
-                XCTAssertEqual(command.executable, "/usr/local/bin/claude-session-scheduler")
+                XCTAssertEqual(command.executable, "/usr/local/bin/prompt-scheduler")
                 XCTAssertEqual(
                     command.arguments,
                     [
@@ -94,22 +120,52 @@ final class EngineClientTests: XCTestCase {
         XCTAssertEqual(response.result?.claudeResponseSummary, "OK")
     }
 
+    func testBuildsStartNowCommandWithProvider() async throws {
+        let client = EngineClient(
+            commandResolver: {
+                EngineCommand(executable: "/usr/local/bin/prompt-scheduler")
+            },
+            runProcess: { command in
+                XCTAssertEqual(
+                    command.arguments,
+                    [
+                        "start-now",
+                        "--cwd", "/tmp/project",
+                        "--provider", "codex",
+                        "--json"
+                    ]
+                )
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: #"{"ok":true,"result":{"status":"success","exit_code":0,"log_path":"/tmp/run.log","provider":"codex","provider_label":"Codex","response_summary":"OK"}}"#.data(using: .utf8)!
+                )
+            }
+        )
+
+        let response = try await client.startNow(cwd: "/tmp/project", provider: "codex")
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.result?.provider, "codex")
+        XCTAssertEqual(response.result?.providerLabel, "Codex")
+        XCTAssertEqual(response.result?.responseSummary, "OK")
+    }
+
     func testDefaultCommandUsesEnvironmentOverride() {
         let client = EngineClient(
             commandResolver: {
-                EngineCommand(executable: "/tmp/css")
+                EngineCommand(executable: "/tmp/prompt-scheduler")
             },
             runProcess: { _ in ProcessResult(exitCode: 0, stdout: Data()) }
         )
 
         let command = client.makeCommand(arguments: ["status", "--json"])
 
-        XCTAssertEqual(command.executable, "/tmp/css")
+        XCTAssertEqual(command.executable, "/tmp/prompt-scheduler")
         XCTAssertEqual(command.arguments, ["status", "--json"])
     }
 
     func testDefaultProjectFolderName() {
-        XCTAssertEqual(SchedulerDefaults.projectFolderName, "Claude Scheduler Project")
-        XCTAssertTrue(SchedulerDefaults.projectFolderPath.hasSuffix("/Claude Scheduler Project"))
+        XCTAssertEqual(SchedulerDefaults.projectFolderName, "Prompt Scheduler Project")
+        XCTAssertTrue(SchedulerDefaults.projectFolderPath.hasSuffix("/Prompt Scheduler Project"))
     }
 }

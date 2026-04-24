@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from claude_session_scheduler.launchd import LaunchdManager
-from claude_session_scheduler.paths import AppPaths
+from prompt_scheduler.launchd import LaunchdManager
+from prompt_scheduler.paths import AppPaths
 
 
 class LaunchdTests(unittest.TestCase):
@@ -18,10 +18,10 @@ class LaunchdTests(unittest.TestCase):
             plist = LaunchdManager(paths).generate_plist(job)
             self.assertEqual(
                 plist["Label"],
-                "com.local.claude-session-scheduler.daily-test-1234",
+                "com.local.prompt-scheduler.daily-test-1234",
             )
             self.assertEqual(plist["StartCalendarInterval"], {"Hour": 9, "Minute": 0})
-            self.assertEqual(plist["ProgramArguments"][1:4], ["-m", "claude_session_scheduler", "run"])
+            self.assertEqual(plist["ProgramArguments"][1:4], ["-m", "prompt_scheduler", "run"])
             self.assertIn("PATH", plist["EnvironmentVariables"])
 
     def test_generate_weekly_plist(self) -> None:

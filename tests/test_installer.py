@@ -2,9 +2,11 @@ import subprocess
 import unittest
 from unittest.mock import Mock, call, patch
 
-from claude_session_scheduler.installer import (
+from prompt_scheduler.installer import (
+    CODEX_PACKAGE,
     CLAUDE_CODE_PACKAGE,
     ClaudeInstallError,
+    install_codex,
     install_claude_code,
     validate_claude_install_prerequisites,
 )
@@ -19,10 +21,10 @@ class InstallerTests(unittest.TestCase):
             stderr="",
         )
         with patch(
-            "claude_session_scheduler.installer.shutil.which",
+            "prompt_scheduler.installer.shutil.which",
             side_effect=lambda name: f"/usr/local/bin/{name}",
         ), patch(
-            "claude_session_scheduler.installer.subprocess.run",
+            "prompt_scheduler.installer.subprocess.run",
             return_value=completed,
         ):
             self.assertEqual(
@@ -38,10 +40,10 @@ class InstallerTests(unittest.TestCase):
             stderr="",
         )
         with patch(
-            "claude_session_scheduler.installer.shutil.which",
+            "prompt_scheduler.installer.shutil.which",
             side_effect=lambda name: f"/usr/local/bin/{name}",
         ), patch(
-            "claude_session_scheduler.installer.subprocess.run",
+            "prompt_scheduler.installer.subprocess.run",
             return_value=completed,
         ):
             with self.assertRaises(ClaudeInstallError):
@@ -54,15 +56,36 @@ class InstallerTests(unittest.TestCase):
         ]
         run_mock = Mock(side_effect=calls)
         with patch(
-            "claude_session_scheduler.installer.shutil.which",
+            "prompt_scheduler.installer.shutil.which",
             side_effect=lambda name: f"/usr/local/bin/{name}",
-        ), patch("claude_session_scheduler.installer.subprocess.run", run_mock):
+        ), patch("prompt_scheduler.installer.subprocess.run", run_mock):
             install_claude_code()
 
         self.assertEqual(
             run_mock.mock_calls[-1],
             call(
                 ["/usr/local/bin/npm", "install", "-g", CLAUDE_CODE_PACKAGE],
+                capture_output=False,
+                text=False,
+            ),
+        )
+
+    def test_install_codex_uses_official_npm_package(self) -> None:
+        calls = [
+            subprocess.CompletedProcess(["node", "--version"], 0, stdout="v20.0.0\n"),
+            subprocess.CompletedProcess(["npm", "install"], 0),
+        ]
+        run_mock = Mock(side_effect=calls)
+        with patch(
+            "prompt_scheduler.installer.shutil.which",
+            side_effect=lambda name: f"/usr/local/bin/{name}",
+        ), patch("prompt_scheduler.installer.subprocess.run", run_mock):
+            install_codex()
+
+        self.assertEqual(
+            run_mock.mock_calls[-1],
+            call(
+                ["/usr/local/bin/npm", "install", "-g", CODEX_PACKAGE],
                 capture_output=False,
                 text=False,
             ),

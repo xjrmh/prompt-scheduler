@@ -1,4 +1,4 @@
-import CSSShared
+import PromptSchedulerShared
 import Foundation
 
 enum MenuBarIconState: Equatable {
@@ -27,11 +27,11 @@ struct ManualSendStatus: Equatable {
     var logPath: String?
     var responseText: String?
 
-    static func sending(timestamp: Date = Date()) -> ManualSendStatus {
+    static func sending(providerLabel: String, timestamp: Date = Date()) -> ManualSendStatus {
         ManualSendStatus(
             tone: .pending,
             title: "Sending prompt",
-            detail: "Starting Claude with the OK prompt.",
+            detail: "Starting \(providerLabel) with the OK prompt.",
             timestamp: timestamp
         )
     }
@@ -46,7 +46,8 @@ struct ManualSendStatus: Equatable {
             )
         }
 
-        let mapped = map(status: result.status, exitCode: result.exitCode)
+        let providerLabel = result.providerLabel ?? "Provider"
+        let mapped = map(status: result.status, exitCode: result.exitCode, providerLabel: providerLabel)
         let detail = cleanMessage(result.message) ?? mapped.detail
         return ManualSendStatus(
             tone: mapped.tone,
@@ -56,7 +57,7 @@ struct ManualSendStatus: Equatable {
             rawStatus: result.status,
             exitCode: result.exitCode,
             logPath: result.logPath,
-            responseText: cleanMessage(result.claudeResponseSummary)
+            responseText: cleanMessage(result.responseSummary ?? result.claudeResponseSummary)
         )
     }
 
@@ -69,32 +70,36 @@ struct ManualSendStatus: Equatable {
         )
     }
 
-    static func loginRequired(timestamp: Date = Date()) -> ManualSendStatus {
+    static func loginRequired(providerLabel: String, timestamp: Date = Date()) -> ManualSendStatus {
         ManualSendStatus(
             tone: .failure,
-            title: "Claude login required",
-            detail: "Sign in with Claude Code before sending prompts.",
+            title: "\(providerLabel) login required",
+            detail: "Sign in with \(providerLabel) before sending prompts.",
             timestamp: timestamp,
             rawStatus: "auth_required"
         )
     }
 
-    private static func map(status: String, exitCode: Int) -> (tone: Tone, title: String, detail: String) {
+    private static func map(
+        status: String,
+        exitCode: Int,
+        providerLabel: String
+    ) -> (tone: Tone, title: String, detail: String) {
         switch status {
         case "success":
-            return (.success, "Send succeeded", "Claude accepted the prompt.")
+            return (.success, "Send succeeded", "\(providerLabel) accepted the prompt.")
         case "auth_required":
-            return (.failure, "Claude login required", "Sign in with Claude Code before sending prompts.")
+            return (.failure, "\(providerLabel) login required", "Sign in with \(providerLabel) before sending prompts.")
         case "usage_limit":
-            return (.warning, "Usage limit reached", "Claude reported a usage limit. Check the log for reset details.")
+            return (.warning, "Usage limit reached", "\(providerLabel) reported a usage limit. Check the log for reset details.")
         case "overlap_skipped":
-            return (.warning, "Send skipped", "Another Claude send is already running.")
+            return (.warning, "Send skipped", "Another \(providerLabel) send is already running.")
         case "skipped":
-            return (.skipped, "Send skipped", "Claude did not run for this request.")
+            return (.skipped, "Send skipped", "\(providerLabel) did not run for this request.")
         case "failed":
-            return (.failure, "Send failed", "Claude exited with code \(exitCode).")
+            return (.failure, "Send failed", "\(providerLabel) exited with code \(exitCode).")
         case "timed_out":
-            return (.failure, "Send timed out", "Claude did not finish within the timeout.")
+            return (.failure, "Send timed out", "\(providerLabel) did not finish within the timeout.")
         default:
             if exitCode == 0 {
                 return (.success, "Send finished", "Command status: \(status).")
@@ -124,24 +129,73 @@ final class AppController: ObservableObject {
         self.engine = engine
     }
 
+    var activeProvider: String? {
+        if let explicit = status?.activeProvider, !explicit.isEmpty {
+            return explicit
+        }
+        if status?.codex?.available == true {
+            return "codex"
+        }
+        return "claude"
+    }
+
+    var activeProviderStatus: ProviderStatus? {
+        guard let provider = activeProvider else {
+            return nil
+        }
+        if let providerStatus = status?.providers?[provider] {
+            return providerStatus
+        }
+        if provider == "codex" {
+            return status?.codex
+        }
+        return status?.claude
+    }
+
+    var activeProviderLabel: String {
+        activeProviderStatus?.label
+            ?? status?.activeProviderLabel
+            ?? (activeProvider == "codex" ? "Codex" : "Claude Code")
+    }
+
+    var loginCommand: String {
+        activeProviderStatus?.loginCommand
+            ?? (activeProvider == "codex" ? "codex login" : "claude auth login")
+    }
+
     var isReady: Bool {
-        status?.claude.available == true && status?.claude.authenticated == true
+        activeProviderStatus?.available == true && activeProviderStatus?.authenticated == true
     }
 
     var readinessText: String {
-        guard let status else {
+        guard status != nil else {
             return "Checking setup"
         }
-        if status.claude.available != true {
-            return "Claude Code not installed"
+        let label = activeProviderLabel
+        guard let providerStatus = activeProviderStatus else {
+            return "No prompt provider configured"
         }
-        if status.claude.authenticated == true {
-            return "Claude CLI: signed in"
+        if providerStatus.available != true {
+            return "\(label) not installed"
         }
-        if status.claude.authenticated == false {
-            return "Claude login required"
+        if providerStatus.authenticated == true {
+            return "\(label): signed in"
         }
-        return "Claude login unknown"
+        if providerStatus.authenticated == false {
+            return "\(label) login required"
+        }
+        return "\(label) login unknown"
+    }
+
+    var providerStatusLines: [String] {
+        guard status != nil else {
+            return []
+        }
+
+        return providerStatusEntries.map { provider, providerStatus in
+            let suffix = provider == activeProvider ? " (active)" : ""
+            return "\(providerStatus.label ?? label(for: provider)): \(shortStatus(providerStatus))\(suffix)"
+        }
     }
 
     var defaultFolder: String {
@@ -153,11 +207,11 @@ final class AppController: ObservableObject {
             return .running
         }
 
-        guard let status else {
+        guard status != nil else {
             return .running
         }
 
-        if status.claude.available != true || status.claude.authenticated != true {
+        if activeProviderStatus?.available != true || activeProviderStatus?.authenticated != true {
             return .warning
         }
 
@@ -175,15 +229,15 @@ final class AppController: ObservableObject {
     var menuBarIconAccessibilityLabel: String {
         switch menuBarIconState {
         case .idle:
-            "Claude status idle"
+            "\(activeProviderLabel) status idle"
         case .running:
-            "Claude status running"
+            "\(activeProviderLabel) status running"
         case .success:
-            "Claude status last run succeeded"
+            "\(activeProviderLabel) status last run succeeded"
         case .warning:
-            "Claude status needs attention"
+            "\(activeProviderLabel) status needs attention"
         case .failure:
-            "Claude status last run failed"
+            "\(activeProviderLabel) status last run failed"
         }
     }
 
@@ -193,21 +247,22 @@ final class AppController: ObservableObject {
         }
     }
 
-    func installClaudeCode() async {
+    func installActiveProvider() async {
         await runTask {
-            status = try await engine.setup(install: true)
-            message = isReady ? "Claude Code is ready." : "Claude setup is incomplete."
+            status = try await engine.setup(install: true, provider: activeProvider)
+            message = isReady ? "\(activeProviderLabel) is ready." : "\(activeProviderLabel) setup is incomplete."
         }
     }
 
     func startNow(cwd: String? = nil) async {
-        if status?.claude.available == true && status?.claude.authenticated == false {
-            let sendStatus = ManualSendStatus.loginRequired()
+        if activeProviderStatus?.available == true && activeProviderStatus?.authenticated == false {
+            let sendStatus = ManualSendStatus.loginRequired(providerLabel: activeProviderLabel)
             lastManualSend = sendStatus
             message = sendStatus.title
             return
         }
-        lastManualSend = .sending()
+        let provider = activeProvider
+        lastManualSend = .sending(providerLabel: activeProviderLabel)
         await runTask(onError: { [weak self] error in
             let status = ManualSendStatus.failed(error.localizedDescription)
             self?.lastManualSend = status
@@ -215,7 +270,7 @@ final class AppController: ObservableObject {
         }) {
             let targetFolder = cwd ?? defaultFolder
             try ensureDefaultFolderIfNeeded(targetFolder)
-            let response = try await engine.startNow(cwd: targetFolder)
+            let response = try await engine.startNow(cwd: targetFolder, provider: provider)
             let sendStatus = ManualSendStatus.finished(response: response)
             lastManualSend = sendStatus
             message = sendStatus.title
@@ -256,6 +311,44 @@ final class AppController: ObservableObject {
             let normalized = (job.status ?? "").lowercased()
             return normalized.contains("running") || normalized.contains("in_progress")
         }
+    }
+
+    private var providerStatusEntries: [(String, ProviderStatus)] {
+        let orderedProviders = ["codex", "claude"]
+        if let providers = status?.providers {
+            return orderedProviders.compactMap { provider in
+                guard let status = providers[provider] else {
+                    return nil
+                }
+                return (provider, status)
+            }
+        }
+
+        var entries: [(String, ProviderStatus)] = []
+        if let codex = status?.codex {
+            entries.append(("codex", codex))
+        }
+        if let claude = status?.claude {
+            entries.append(("claude", claude))
+        }
+        return entries
+    }
+
+    private func label(for provider: String) -> String {
+        provider == "codex" ? "Codex" : "Claude Code"
+    }
+
+    private func shortStatus(_ status: ProviderStatus) -> String {
+        if status.available != true {
+            return "not installed"
+        }
+        if status.authenticated == true {
+            return "signed in"
+        }
+        if status.authenticated == false {
+            return "login required"
+        }
+        return "login unknown"
     }
 
     private var latestJobStatus: String? {

@@ -10,18 +10,18 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from claude_session_scheduler.auth import ClaudeAuthCheck
-from claude_session_scheduler.cli import DEFAULT_PROJECT_FOLDER_NAME
-from claude_session_scheduler.cli import main
-from claude_session_scheduler.paths import AppPaths
-from claude_session_scheduler.storage import JobStore, StateStore, utc_now_iso
+from prompt_scheduler.auth import ClaudeAuthCheck
+from prompt_scheduler.cli import DEFAULT_PROJECT_FOLDER_NAME
+from prompt_scheduler.cli import main
+from prompt_scheduler.paths import AppPaths
+from prompt_scheduler.storage import JobStore, StateStore, utc_now_iso
 
 
 class CliTests(unittest.TestCase):
     def _env(self, root: Path) -> dict[str, str]:
         return {
-            "CLAUDE_SESSION_SCHEDULER_HOME": str(root / "state"),
-            "CLAUDE_SESSION_SCHEDULER_LAUNCH_AGENTS_DIR": str(root / "agents"),
+            "PROMPT_SCHEDULER_HOME": str(root / "state"),
+            "PROMPT_SCHEDULER_LAUNCH_AGENTS_DIR": str(root / "agents"),
             "HOME": str(root / "home"),
         }
 
@@ -34,10 +34,37 @@ class CliTests(unittest.TestCase):
             error="Claude login required. Run `claude auth login`.",
         )
 
-    def _auth_for_path(self, claude: str | None) -> ClaudeAuthCheck:
-        if claude:
+    def _auth_for_provider(self, provider: str, executable: str | None) -> ClaudeAuthCheck:
+        if executable:
+            if provider == "codex":
+                return ClaudeAuthCheck(authenticated=True, auth_method="ChatGPT")
             return self._auth_ok()
+        if provider == "codex":
+            return ClaudeAuthCheck(authenticated=None, error="Codex is not installed.")
         return ClaudeAuthCheck(authenticated=None, error="Claude Code is not installed.")
+
+    def _which_claude_and_launchctl(self, name: str) -> str | None:
+        if name == "claude":
+            return "/usr/local/bin/claude"
+        if name == "launchctl":
+            return "/bin/launchctl"
+        return None
+
+    def _which_codex_and_launchctl(self, name: str) -> str | None:
+        if name == "codex":
+            return "/usr/local/bin/codex"
+        if name == "launchctl":
+            return "/bin/launchctl"
+        return None
+
+    def _find_no_provider(self, provider: str) -> str | None:
+        return None
+
+    def _find_claude_provider(self, provider: str) -> str | None:
+        return "/usr/local/bin/claude" if provider == "claude" else None
+
+    def _find_codex_provider(self, provider: str) -> str | None:
+        return "/usr/local/bin/codex" if provider == "codex" else None
 
     def test_schedule_add_dry_run_outputs_job_and_plist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -111,7 +138,7 @@ class CliTests(unittest.TestCase):
                 }
             )
             with patch.dict("os.environ", self._env(root)), patch(
-                "claude_session_scheduler.cli.sys.stdin", StringIO(statusline_input)
+                "prompt_scheduler.cli.sys.stdin", StringIO(statusline_input)
             ), redirect_stdout(out):
                 code = main(["statusline"])
 
@@ -134,13 +161,13 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             payload = json.loads(out.getvalue())
-            self.assertEqual(payload["command"], "python3 -m claude_session_scheduler statusline")
+            self.assertEqual(payload["command"], "python3 -m prompt_scheduler statusline")
             settings = json.loads((root / "home" / ".claude" / "settings.json").read_text())
             self.assertEqual(
                 settings["statusLine"],
                 {
                     "type": "command",
-                    "command": "python3 -m claude_session_scheduler statusline",
+                    "command": "python3 -m prompt_scheduler statusline",
                 },
             )
 
@@ -171,7 +198,7 @@ class CliTests(unittest.TestCase):
                     return "/bin/launchctl"
                 return None
 
-            def fake_install() -> None:
+            def fake_install(provider: str, *, quiet: bool = False) -> None:
                 installed["value"] = True
 
             class FakeStdin:
@@ -181,16 +208,18 @@ class CliTests(unittest.TestCase):
 
             out = StringIO()
             with patch.dict("os.environ", self._env(Path(tmp))), patch(
-                "claude_session_scheduler.cli.shutil.which", side_effect=fake_which
+                "prompt_scheduler.cli.shutil.which", side_effect=fake_which
             ), patch(
-                "claude_session_scheduler.cli.validate_claude_install_prerequisites",
+                "prompt_scheduler.cli.find_provider_executable", side_effect=fake_which
+            ), patch(
+                "prompt_scheduler.cli.validate_provider_install_prerequisites",
                 return_value=("/usr/local/bin/node", "/usr/local/bin/npm"),
             ), patch(
-                "claude_session_scheduler.cli.install_claude_code", side_effect=fake_install
+                "prompt_scheduler.cli.install_provider", side_effect=fake_install
             ), patch(
-                "claude_session_scheduler.cli.check_claude_auth", side_effect=self._auth_for_path
+                "prompt_scheduler.cli.check_provider_auth", side_effect=self._auth_for_provider
             ), patch(
-                "claude_session_scheduler.cli.sys.stdin", FakeStdin()
+                "prompt_scheduler.cli.sys.stdin", FakeStdin()
             ), patch(
                 "builtins.input", return_value="y"
             ), redirect_stdout(out):
@@ -210,21 +239,23 @@ class CliTests(unittest.TestCase):
             out = StringIO()
             err = StringIO()
             with patch.dict("os.environ", self._env(Path(tmp))), patch(
-                "claude_session_scheduler.cli.shutil.which",
+                "prompt_scheduler.cli.shutil.which",
                 side_effect=lambda name: "/bin/launchctl" if name == "launchctl" else None,
             ), patch(
-                "claude_session_scheduler.cli.validate_claude_install_prerequisites",
+                "prompt_scheduler.cli.find_provider_executable", side_effect=self._find_no_provider
+            ), patch(
+                "prompt_scheduler.cli.validate_provider_install_prerequisites",
                 return_value=("/usr/local/bin/node", "/usr/local/bin/npm"),
             ), patch(
-                "claude_session_scheduler.cli.install_claude_code"
+                "prompt_scheduler.cli.install_provider"
             ) as install_mock, patch(
-                "claude_session_scheduler.cli.sys.stdin", FakeStdin()
+                "prompt_scheduler.cli.sys.stdin", FakeStdin()
             ), redirect_stdout(out), redirect_stderr(err):
                 code = main(["doctor"])
 
             self.assertEqual(code, 1)
             install_mock.assert_not_called()
-            self.assertIn("doctor --yes", err.getvalue())
+            self.assertIn("doctor --provider claude --yes", err.getvalue())
 
     def test_setup_installed_interactive_declines_first_schedule(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -235,12 +266,15 @@ class CliTests(unittest.TestCase):
 
             out = StringIO()
             with patch.dict("os.environ", self._env(Path(tmp))), patch(
-                "claude_session_scheduler.cli.shutil.which",
+                "prompt_scheduler.cli.shutil.which",
                 side_effect=lambda name: f"/usr/local/bin/{name}",
             ), patch(
-                "claude_session_scheduler.cli.check_claude_auth", side_effect=self._auth_for_path
+                "prompt_scheduler.cli.find_provider_executable",
+                side_effect=lambda provider: f"/usr/local/bin/{provider}",
             ), patch(
-                "claude_session_scheduler.cli.sys.stdin", FakeStdin()
+                "prompt_scheduler.cli.check_provider_auth", side_effect=self._auth_for_provider
+            ), patch(
+                "prompt_scheduler.cli.sys.stdin", FakeStdin()
             ), patch(
                 "builtins.input", return_value="n"
             ), redirect_stdout(out):
@@ -265,21 +299,23 @@ class CliTests(unittest.TestCase):
                 def isatty() -> bool:
                     return True
 
-            def fake_install() -> None:
+            def fake_install(provider: str, *, quiet: bool = False) -> None:
                 installed["value"] = True
 
             out = StringIO()
             with patch.dict("os.environ", self._env(Path(tmp))), patch(
-                "claude_session_scheduler.cli.shutil.which", side_effect=fake_which
+                "prompt_scheduler.cli.shutil.which", side_effect=fake_which
             ), patch(
-                "claude_session_scheduler.cli.validate_claude_install_prerequisites",
+                "prompt_scheduler.cli.find_provider_executable", side_effect=fake_which
+            ), patch(
+                "prompt_scheduler.cli.validate_provider_install_prerequisites",
                 return_value=("/usr/local/bin/node", "/usr/local/bin/npm"),
             ), patch(
-                "claude_session_scheduler.cli.install_claude_code", side_effect=fake_install
+                "prompt_scheduler.cli.install_provider", side_effect=fake_install
             ), patch(
-                "claude_session_scheduler.cli.check_claude_auth", side_effect=self._auth_for_path
+                "prompt_scheduler.cli.check_provider_auth", side_effect=self._auth_for_provider
             ), patch(
-                "claude_session_scheduler.cli.sys.stdin", FakeStdin()
+                "prompt_scheduler.cli.sys.stdin", FakeStdin()
             ), patch(
                 "builtins.input", side_effect=["y", "n"]
             ), redirect_stdout(out):
@@ -298,13 +334,15 @@ class CliTests(unittest.TestCase):
 
             out = StringIO()
             with patch.dict("os.environ", self._env(Path(tmp))), patch(
-                "claude_session_scheduler.cli.shutil.which",
+                "prompt_scheduler.cli.shutil.which",
                 side_effect=lambda name: "/bin/launchctl" if name == "launchctl" else None,
             ), patch(
-                "claude_session_scheduler.cli.validate_claude_install_prerequisites",
+                "prompt_scheduler.cli.find_provider_executable", side_effect=self._find_no_provider
+            ), patch(
+                "prompt_scheduler.cli.validate_provider_install_prerequisites",
                 return_value=("/usr/local/bin/node", "/usr/local/bin/npm"),
             ), patch(
-                "claude_session_scheduler.cli.sys.stdin", FakeStdin()
+                "prompt_scheduler.cli.sys.stdin", FakeStdin()
             ), patch(
                 "builtins.input", return_value="n"
             ), redirect_stdout(out):
@@ -323,21 +361,23 @@ class CliTests(unittest.TestCase):
             out = StringIO()
             err = StringIO()
             with patch.dict("os.environ", self._env(Path(tmp))), patch(
-                "claude_session_scheduler.cli.shutil.which",
+                "prompt_scheduler.cli.shutil.which",
                 side_effect=lambda name: "/bin/launchctl" if name == "launchctl" else None,
             ), patch(
-                "claude_session_scheduler.cli.validate_claude_install_prerequisites",
+                "prompt_scheduler.cli.find_provider_executable", side_effect=self._find_no_provider
+            ), patch(
+                "prompt_scheduler.cli.validate_provider_install_prerequisites",
                 return_value=("/usr/local/bin/node", "/usr/local/bin/npm"),
             ), patch(
-                "claude_session_scheduler.cli.install_claude_code"
+                "prompt_scheduler.cli.install_provider"
             ) as install_mock, patch(
-                "claude_session_scheduler.cli.sys.stdin", FakeStdin()
+                "prompt_scheduler.cli.sys.stdin", FakeStdin()
             ), redirect_stdout(out), redirect_stderr(err):
                 code = main(["setup"])
 
             self.assertEqual(code, 1)
             install_mock.assert_not_called()
-            self.assertIn("claude-session-scheduler setup --yes", err.getvalue())
+            self.assertIn("prompt-scheduler setup --provider claude --yes", err.getvalue())
             self.assertIn("Next commands", out.getvalue())
 
     def test_top_level_add_dry_run_defaults_to_project_folder(self) -> None:
@@ -413,7 +453,7 @@ class CliTests(unittest.TestCase):
         try:
             os.chdir(tmp)
             with patch.dict("os.environ", self._env(root)), patch(
-                "claude_session_scheduler.cli.sys.stdin", FakeStdin()
+                "prompt_scheduler.cli.sys.stdin", FakeStdin()
             ), patch(
                 "builtins.input", side_effect=answers
             ), redirect_stdout(out):
@@ -441,8 +481,10 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = StringIO()
             with patch.dict("os.environ", self._env(Path(tmp))), patch(
-                "claude_session_scheduler.cli.shutil.which",
+                "prompt_scheduler.cli.shutil.which",
                 return_value=None,
+            ), patch(
+                "prompt_scheduler.cli.find_provider_executable", side_effect=self._find_no_provider
             ), redirect_stdout(out):
                 code = main(["status"])
             self.assertEqual(code, 0)
@@ -476,15 +518,17 @@ class CliTests(unittest.TestCase):
             )
             out = StringIO()
             with patch.dict("os.environ", self._env(root)), patch(
-                "claude_session_scheduler.cli.shutil.which",
-                return_value="/usr/local/bin/claude",
+                "prompt_scheduler.cli.shutil.which",
+                side_effect=self._which_claude_and_launchctl,
             ), patch(
-                "claude_session_scheduler.cli.check_claude_auth", side_effect=self._auth_for_path
+                "prompt_scheduler.cli.find_provider_executable", side_effect=self._find_claude_provider
+            ), patch(
+                "prompt_scheduler.cli.check_provider_auth", side_effect=self._auth_for_provider
             ), redirect_stdout(out):
                 code = main(["status"])
             self.assertEqual(code, 0)
             self.assertIn("Claude Code: OK /usr/local/bin/claude", out.getvalue())
-            self.assertIn("Claude login: signed in via claude.ai", out.getvalue())
+            self.assertIn("Claude Code login: signed in via claude.ai", out.getvalue())
             self.assertIn("Next observed reset: 2026-04-25T09:00:00-04:00", out.getvalue())
             self.assertIn("Next estimated reset: 2026-04-25T10:00:00-04:00", out.getvalue())
             self.assertIn("Jobs: 1", out.getvalue())
@@ -509,10 +553,12 @@ class CliTests(unittest.TestCase):
             )
             out = StringIO()
             with patch.dict("os.environ", self._env(root)), patch(
-                "claude_session_scheduler.cli.shutil.which",
-                side_effect=lambda name: "/usr/local/bin/claude" if name == "claude" else "/bin/launchctl",
+                "prompt_scheduler.cli.shutil.which",
+                side_effect=self._which_claude_and_launchctl,
             ), patch(
-                "claude_session_scheduler.cli.check_claude_auth", side_effect=self._auth_for_path
+                "prompt_scheduler.cli.find_provider_executable", side_effect=self._find_claude_provider
+            ), patch(
+                "prompt_scheduler.cli.check_provider_auth", side_effect=self._auth_for_provider
             ), redirect_stdout(out):
                 code = main(["status", "--json"])
 
@@ -534,15 +580,39 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["reset"]["reset_source"], "claude-code-statusline")
             self.assertEqual(payload["paths"]["state"], str(root / "state"))
 
+    def test_status_json_uses_codex_when_only_codex_is_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = StringIO()
+            with patch.dict("os.environ", self._env(root)), patch(
+                "prompt_scheduler.cli.shutil.which",
+                side_effect=self._which_codex_and_launchctl,
+            ), patch(
+                "prompt_scheduler.cli.find_provider_executable", side_effect=self._find_codex_provider
+            ), patch(
+                "prompt_scheduler.cli.check_provider_auth", side_effect=self._auth_for_provider
+            ), redirect_stdout(out):
+                code = main(["status", "--json"])
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["active_provider"], "codex")
+            self.assertTrue(payload["codex"]["available"])
+            self.assertTrue(payload["codex"]["authenticated"])
+            self.assertFalse(payload["claude"]["available"])
+
     def test_status_json_reports_auth_required(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             out = StringIO()
             with patch.dict("os.environ", self._env(root)), patch(
-                "claude_session_scheduler.cli.shutil.which",
-                side_effect=lambda name: "/usr/local/bin/claude" if name == "claude" else "/bin/launchctl",
+                "prompt_scheduler.cli.shutil.which",
+                side_effect=self._which_claude_and_launchctl,
             ), patch(
-                "claude_session_scheduler.cli.check_claude_auth", return_value=self._auth_required()
+                "prompt_scheduler.cli.find_provider_executable", side_effect=self._find_claude_provider
+            ), patch(
+                "prompt_scheduler.cli.check_provider_auth", return_value=self._auth_required()
             ), redirect_stdout(out):
                 code = main(["status", "--json"])
 
@@ -572,10 +642,12 @@ class CliTests(unittest.TestCase):
             )
             out = StringIO()
             with patch.dict("os.environ", self._env(root)), patch(
-                "claude_session_scheduler.cli.shutil.which",
-                side_effect=lambda name: "/usr/local/bin/claude" if name == "claude" else "/bin/launchctl",
+                "prompt_scheduler.cli.shutil.which",
+                side_effect=self._which_claude_and_launchctl,
             ), patch(
-                "claude_session_scheduler.cli.check_claude_auth", side_effect=self._auth_for_path
+                "prompt_scheduler.cli.find_provider_executable", side_effect=self._find_claude_provider
+            ), patch(
+                "prompt_scheduler.cli.check_provider_auth", side_effect=self._auth_for_provider
             ), redirect_stdout(out):
                 code = main(["status", "--json"])
 
@@ -609,6 +681,33 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["job"]["name"], "json")
             self.assertEqual(payload["job"]["schedule_label"], "daily at 09:00")
             self.assertFalse(payload["launchd"]["loaded"])
+
+    def test_add_json_dry_run_accepts_codex_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = StringIO()
+            with patch.dict("os.environ", self._env(Path(tmp))), redirect_stdout(out):
+                code = main(
+                    [
+                        "add",
+                        "--provider",
+                        "codex",
+                        "--name",
+                        "codex-json",
+                        "--cwd",
+                        tmp,
+                        "--daily",
+                        "09:00",
+                        "--prompt",
+                        "hello",
+                        "--dry-run",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out.getvalue())
+            self.assertEqual(payload["job"]["provider"], "codex")
+            self.assertEqual(payload["job"]["provider_label"], "Codex")
 
     def test_remove_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

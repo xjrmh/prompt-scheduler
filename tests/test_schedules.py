@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import unittest
 
-from claude_session_scheduler.schedules import (
+from prompt_scheduler.schedules import (
     ScheduleError,
     parse_daily,
     parse_once,

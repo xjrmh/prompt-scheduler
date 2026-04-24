@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-APP_NAME = "claude-session-scheduler"
-HOME_ENV = "CLAUDE_SESSION_SCHEDULER_HOME"
-LAUNCH_AGENTS_ENV = "CLAUDE_SESSION_SCHEDULER_LAUNCH_AGENTS_DIR"
+APP_NAME = "prompt-scheduler"
+HOME_ENV = "PROMPT_SCHEDULER_HOME"
+LAUNCH_AGENTS_ENV = "PROMPT_SCHEDULER_LAUNCH_AGENTS_DIR"
 
 
 @dataclass(frozen=True)

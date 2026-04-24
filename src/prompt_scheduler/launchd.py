@@ -13,7 +13,7 @@ from .paths import AppPaths
 from .schedules import schedule_to_start_calendar
 
 
-LABEL_PREFIX = "com.local.claude-session-scheduler"
+LABEL_PREFIX = "com.local.prompt-scheduler"
 DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 
@@ -53,7 +53,7 @@ class LaunchdManager:
             "ProgramArguments": [
                 sys.executable,
                 "-m",
-                "claude_session_scheduler",
+                "prompt_scheduler",
                 "run",
                 job["id"],
             ],

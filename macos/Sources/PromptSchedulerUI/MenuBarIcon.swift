@@ -2,14 +2,15 @@ import AppKit
 
 enum MenuBarIcon {
     private static let canvasSize: CGFloat = 128
-    private static let renderedSize: CGFloat = 22
+    private static let renderedSize: CGFloat = 20
+    private static let verticalArtworkOffset: CGFloat = -canvasSize * 0.05
 
     static func image(for state: MenuBarIconState) -> NSImage {
         let image = NSImage(size: NSSize(width: canvasSize, height: canvasSize))
         image.lockFocus()
         NSGraphicsContext.current?.imageInterpolation = .high
 
-        drawClaudeMark()
+        drawPromptSchedulerMark()
         drawStatusBadge(state)
 
         image.unlockFocus()
@@ -18,30 +19,52 @@ enum MenuBarIcon {
         return image
     }
 
-    private static func drawClaudeMark() {
-        let center = NSPoint(x: canvasSize * 0.39, y: canvasSize * 0.57)
-        let innerRadius = canvasSize * 0.075
-        let outerRadius = canvasSize * 0.345
-        let spokeWidth = canvasSize * 0.105
-
+    private static func drawPromptSchedulerMark() {
+        let frame = NSRect(
+            x: canvasSize * 0.16,
+            y: canvasSize * 0.27 + verticalArtworkOffset,
+            width: canvasSize * 0.58,
+            height: canvasSize * 0.54
+        )
+        let panel = NSBezierPath(
+            roundedRect: frame,
+            xRadius: canvasSize * 0.08,
+            yRadius: canvasSize * 0.08
+        )
+        panel.lineWidth = canvasSize * 0.07
         NSColor.black.setStroke()
-        for degrees in stride(from: 0.0, to: 180.0, by: 30.0) {
-            let radians = degrees * Double.pi / 180.0
-            let dx = CGFloat(cos(radians))
-            let dy = CGFloat(sin(radians))
-            let path = NSBezierPath()
-            path.lineCapStyle = .round
-            path.lineWidth = spokeWidth
-            path.move(to: NSPoint(x: center.x + dx * innerRadius, y: center.y + dy * innerRadius))
-            path.line(to: NSPoint(x: center.x + dx * outerRadius, y: center.y + dy * outerRadius))
-            path.move(to: NSPoint(x: center.x - dx * innerRadius, y: center.y - dy * innerRadius))
-            path.line(to: NSPoint(x: center.x - dx * outerRadius, y: center.y - dy * outerRadius))
-            path.stroke()
-        }
+        panel.stroke()
+
+        let header = NSBezierPath()
+        header.lineCapStyle = .round
+        header.lineWidth = canvasSize * 0.06
+        header.move(to: NSPoint(x: frame.minX + frame.width * 0.18, y: frame.maxY - frame.height * 0.27))
+        header.line(to: NSPoint(x: frame.maxX - frame.width * 0.18, y: frame.maxY - frame.height * 0.27))
+        header.stroke()
+
+        let prompt = NSBezierPath()
+        prompt.lineCapStyle = .round
+        prompt.lineJoinStyle = .round
+        prompt.lineWidth = canvasSize * 0.065
+        prompt.move(to: NSPoint(x: frame.minX + frame.width * 0.22, y: frame.minY + frame.height * 0.34))
+        prompt.line(to: NSPoint(x: frame.minX + frame.width * 0.34, y: frame.minY + frame.height * 0.45))
+        prompt.line(to: NSPoint(x: frame.minX + frame.width * 0.22, y: frame.minY + frame.height * 0.56))
+        prompt.move(to: NSPoint(x: frame.minX + frame.width * 0.45, y: frame.minY + frame.height * 0.34))
+        prompt.line(to: NSPoint(x: frame.minX + frame.width * 0.64, y: frame.minY + frame.height * 0.34))
+        prompt.stroke()
+
+        let binding = NSBezierPath()
+        binding.lineCapStyle = .round
+        binding.lineWidth = canvasSize * 0.07
+        binding.move(to: NSPoint(x: frame.minX + frame.width * 0.28, y: frame.maxY + canvasSize * 0.04))
+        binding.line(to: NSPoint(x: frame.minX + frame.width * 0.28, y: frame.maxY - canvasSize * 0.08))
+        binding.move(to: NSPoint(x: frame.minX + frame.width * 0.56, y: frame.maxY + canvasSize * 0.04))
+        binding.line(to: NSPoint(x: frame.minX + frame.width * 0.56, y: frame.maxY - canvasSize * 0.08))
+        binding.stroke()
     }
 
     private static func drawStatusBadge(_ state: MenuBarIconState) {
-        let center = NSPoint(x: canvasSize * 0.69, y: canvasSize * 0.34)
+        let center = NSPoint(x: canvasSize * 0.69, y: canvasSize * 0.34 + verticalArtworkOffset)
         let cutoutRadius = canvasSize * 0.25
         let badgeRadius = canvasSize * 0.18
 

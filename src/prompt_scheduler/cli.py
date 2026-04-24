@@ -2,26 +2,36 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .auth import ClaudeAuthCheck, check_claude_auth
+from .auth import AuthCheck, ClaudeAuthCheck, check_provider_auth
 from .ids import make_job_id
 from .installer import (
-    CLAUDE_INSTALL_COMMAND,
     ClaudeInstallError,
-    install_claude_code,
-    validate_claude_install_prerequisites,
+    install_provider,
+    validate_provider_install_prerequisites,
 )
 from .launchd import LaunchdError, LaunchdManager
 from .paths import AppPaths
+from .providers import (
+    CLAUDE,
+    CODEX,
+    PROVIDER_SPECS,
+    SUPPORTED_PROVIDERS,
+    find_provider_executable,
+    login_command_text,
+    normalize_provider,
+    provider_spec,
+)
 from .runner import (
     MINIMAL_WINDOW_PROMPT,
     RunnerError,
-    extract_claude_response_summary,
+    extract_response_summary,
     run_inline_prompt,
     run_job,
 )
@@ -29,27 +39,31 @@ from .schedules import ScheduleError, format_schedule, parse_once, parse_schedul
 from .storage import JobStore, StateStore, utc_now_iso
 
 
-DEFAULT_PROJECT_FOLDER_NAME = "Claude Scheduler Project"
-STATUSLINE_COMMAND = "python3 -m claude_session_scheduler statusline"
+DEFAULT_PROJECT_FOLDER_NAME = "Prompt Scheduler Project"
+STATUSLINE_COMMAND = "python3 -m prompt_scheduler statusline"
 RATE_LIMIT_WINDOWS = ("five_hour", "seven_day")
+PROVIDER_ENV_VAR = "PROMPT_SCHEDULER_PROVIDER"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="claude-session-scheduler",
-        description="Schedule local Claude Code prompts with macOS launchd.",
+        prog="prompt-scheduler",
+        description="Schedule local Claude Code or Codex prompts with macOS launchd.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    setup = subparsers.add_parser("setup", help="Set up Claude Session Scheduler.")
+    setup = subparsers.add_parser("setup", help="Set up Prompt Scheduler.")
+    _add_provider_arg(setup, include_auto=True)
     _add_install_flags(setup)
     _add_json_flag(setup)
 
     doctor = subparsers.add_parser("doctor", help="Check local prerequisites.")
+    _add_provider_arg(doctor, include_auto=True)
     _add_install_flags(doctor)
     _add_json_flag(doctor)
 
-    top_add = subparsers.add_parser("add", help="Add a scheduled Claude prompt.")
+    top_add = subparsers.add_parser("add", help="Add a scheduled prompt.")
+    _add_provider_arg(top_add)
     _add_schedule_args(top_add, required=False)
     _add_json_flag(top_add)
 
@@ -83,14 +97,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_json_flag(install_statusline)
 
     start_now = subparsers.add_parser(
-        "start-now", help="Start a Claude session by sending a tiny OK prompt."
+        "start-now", help="Start a provider session by sending a tiny OK prompt."
     )
+    _add_provider_arg(start_now, include_auto=True)
     start_now.add_argument("--cwd", default=None)
     _add_json_flag(start_now)
 
     start_reset = subparsers.add_parser(
         "start-at-reset", help="Schedule the minimal prompt at the observed reset time."
     )
+    _add_provider_arg(start_reset)
     start_reset.add_argument("--cwd", default=None)
     start_reset.add_argument("--buffer-minutes", type=int, default=2)
     start_reset.add_argument("--dry-run", action="store_true")
@@ -98,7 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     schedule = subparsers.add_parser("schedule", help="Manage scheduled jobs.")
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
-    add = schedule_sub.add_parser("add", help="Add a scheduled Claude prompt.")
+    add = schedule_sub.add_parser("add", help="Add a scheduled prompt.")
+    _add_provider_arg(add)
     _add_schedule_args(add, required=True)
     _add_json_flag(add)
 
@@ -111,16 +128,18 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="Run a job by id.")
     run.add_argument("job_id")
 
-    window = subparsers.add_parser("window", help="Start Claude usage windows.")
+    window = subparsers.add_parser("window", help="Start provider usage windows.")
     window_sub = window.add_subparsers(dest="window_command", required=True)
     start_now = window_sub.add_parser(
-        "start-now", help="Start a Claude session by sending a tiny OK prompt."
+        "start-now", help="Start a provider session by sending a tiny OK prompt."
     )
+    _add_provider_arg(start_now, include_auto=True)
     start_now.add_argument("--cwd", required=True)
     _add_json_flag(start_now)
     start_reset = window_sub.add_parser(
         "start-at-reset", help="Schedule the minimal prompt at the observed reset time."
     )
+    _add_provider_arg(start_reset)
     start_reset.add_argument("--cwd", required=True)
     start_reset.add_argument("--buffer-minutes", type=int, default=2)
     start_reset.add_argument("--dry-run", action="store_true")
@@ -138,12 +157,26 @@ def _add_install_flags(parser: argparse.ArgumentParser) -> None:
     install.add_argument(
         "--yes",
         action="store_true",
-        help="Install Claude Code without prompting if it is missing.",
+        help="Install the selected provider without prompting if it is missing.",
     )
     install.add_argument(
         "--no-install",
         action="store_true",
-        help="Only report missing Claude Code; do not prompt to install it.",
+        help="Only report missing providers; do not prompt to install one.",
+    )
+
+
+def _add_provider_arg(parser: argparse.ArgumentParser, *, include_auto: bool = False) -> None:
+    choices = ("auto",) + SUPPORTED_PROVIDERS if include_auto else SUPPORTED_PROVIDERS
+    parser.add_argument(
+        "--provider",
+        choices=choices,
+        default="auto" if include_auto else None,
+        help=(
+            "Prompt provider to use."
+            if not include_auto
+            else "Prompt provider to use, or auto to prefer an authenticated provider."
+        ),
     )
 
 
@@ -178,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "setup":
             return command_setup(
                 paths,
+                provider_selection=args.provider,
                 assume_yes=args.yes,
                 prompt_install=not args.no_install,
                 json_output=args.json,
@@ -185,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "doctor":
             return command_doctor(
                 paths,
+                provider_selection=args.provider,
                 assume_yes=args.yes,
                 prompt_install=not args.no_install,
                 json_output=args.json,
@@ -202,7 +237,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "install-statusline":
             return command_install_statusline(args, paths)
         if args.command == "start-now":
-            return command_start_now(args.cwd or str(Path.cwd()), paths, json_output=args.json)
+            return command_start_now(
+                args.cwd or str(Path.cwd()),
+                paths,
+                provider_selection=args.provider,
+                json_output=args.json,
+            )
         if args.command == "start-at-reset":
             if args.cwd is None:
                 args.cwd = str(Path.cwd())
@@ -265,7 +305,7 @@ def command_install_statusline(args: argparse.Namespace, paths: AppPaths) -> int
     if replaced and not args.force:
         raise ValueError(
             "Claude Code statusLine is already configured; rerun with "
-            "`claude-session-scheduler install-statusline --force` to replace it."
+            "`prompt-scheduler install-statusline --force` to replace it."
         )
 
     settings["statusLine"] = {"type": "command", "command": STATUSLINE_COMMAND}
@@ -420,42 +460,165 @@ def _short_time(value: Any) -> str | None:
         return None
 
 
+def _provider_from_env() -> str | None:
+    value = os.environ.get(PROVIDER_ENV_VAR)
+    if value and value.strip().lower() in PROVIDER_SPECS:
+        return value.strip().lower()
+    return None
+
+
+def _provider_for_new_job(requested: str | None) -> str:
+    if requested:
+        return normalize_provider(requested, default=CLAUDE)
+    return _provider_from_env() or CLAUDE
+
+
+def _provider_executables() -> dict[str, str | None]:
+    return {
+        provider: find_provider_executable(provider)
+        for provider in PROVIDER_SPECS
+    }
+
+
+def _provider_status(provider: str, executable: str | None) -> dict[str, Any]:
+    auth = check_provider_auth(provider, executable)
+    return {
+        "available": executable is not None,
+        "path": executable,
+        "authenticated": auth.authenticated,
+        "auth_method": auth.auth_method,
+        "auth_error": auth.error,
+        "login_command": login_command_text(provider),
+        "install_command": " ".join(provider_spec(provider).install_command),
+        "label": provider_spec(provider).label,
+    }
+
+
+def _provider_is_ready(status: dict[str, Any] | None) -> bool:
+    return bool(status and status.get("available") and status.get("authenticated") is True)
+
+
+def _choose_active_provider(
+    providers: dict[str, dict[str, Any]],
+    requested: str | None = "auto",
+) -> str:
+    if requested and requested != "auto":
+        return normalize_provider(requested, default=CLAUDE)
+
+    env_provider = _provider_from_env()
+    if env_provider and env_provider in providers:
+        return env_provider
+
+    for provider in (CODEX, CLAUDE):
+        if _provider_is_ready(providers.get(provider)):
+            return provider
+    for provider in (CODEX, CLAUDE):
+        if providers.get(provider, {}).get("available"):
+            return provider
+    return CLAUDE
+
+
+def _active_provider_status(payload: dict[str, Any]) -> dict[str, Any]:
+    provider = payload.get("active_provider") or CLAUDE
+    providers = payload.get("providers") or {}
+    status = providers.get(provider)
+    if isinstance(status, dict):
+        return status
+    legacy = payload.get("claude")
+    return legacy if isinstance(legacy, dict) else {}
+
+
+def _provider_ready_from_payload(payload: dict[str, Any]) -> bool:
+    providers = payload.get("providers") or {}
+    if isinstance(providers, dict):
+        return any(_provider_is_ready(status) for status in providers.values())
+    return _provider_is_ready(payload.get("claude"))
+
+
+def _resolve_run_provider(
+    paths: AppPaths,
+    *,
+    provider_selection: str | None = "auto",
+) -> str:
+    if provider_selection and provider_selection != "auto":
+        return normalize_provider(provider_selection, default=CLAUDE)
+    payload = _status_payload(paths, provider_selection=provider_selection)
+    return normalize_provider(payload.get("active_provider"), default=CLAUDE)
+
+
 def command_doctor(
     paths: AppPaths,
     *,
+    provider_selection: str | None = "auto",
     assume_yes: bool = False,
     prompt_install: bool = True,
     json_output: bool = False,
 ) -> int:
     paths.ensure()
-    claude = shutil.which("claude")
+    executables = _provider_executables()
     launchctl = shutil.which("launchctl")
     if json_output:
-        if claude is None and prompt_install and assume_yes:
-            _maybe_install_claude_json()
-            claude = shutil.which("claude")
-        payload = _status_payload(paths, claude=claude, launchctl=launchctl)
+        payload = _status_payload(
+            paths,
+            provider_selection=provider_selection,
+            executables=executables,
+            launchctl=launchctl,
+        )
+        active_provider = payload["active_provider"]
+        active_status = _active_provider_status(payload)
+        if (
+            not active_status.get("available")
+            and prompt_install
+            and assume_yes
+            and _maybe_install_provider_json(active_provider)
+        ):
+            executables = _provider_executables()
+            payload = _status_payload(
+                paths,
+                provider_selection=provider_selection,
+                executables=executables,
+                launchctl=launchctl,
+            )
         ok = _status_checks_ok(payload)
         payload["ok"] = ok
-        if claude is None:
-            payload["next_commands"] = ["claude-session-scheduler doctor --yes"]
-        elif payload["claude"].get("authenticated") is not True:
-            payload["next_commands"] = ["claude auth login"]
+        active_status = _active_provider_status(payload)
+        active_provider = payload["active_provider"]
+        if not active_status.get("available"):
+            payload["next_commands"] = [
+                f"prompt-scheduler doctor --provider {active_provider} --yes"
+            ]
+        elif active_status.get("authenticated") is not True:
+            payload["next_commands"] = [login_command_text(active_provider)]
         _emit_json(payload)
         return 0 if ok else 1
 
-    ok = _print_doctor_checks(paths, claude=claude, launchctl=launchctl)
+    payload = _status_payload(
+        paths,
+        provider_selection=provider_selection,
+        executables=executables,
+        launchctl=launchctl,
+    )
+    ok = _print_doctor_checks(payload)
 
-    if claude is None and prompt_install:
-        installed = _maybe_install_claude(
+    active_provider = payload["active_provider"]
+    active_status = _active_provider_status(payload)
+    if not active_status.get("available") and prompt_install:
+        installed = _maybe_install_provider(
+            active_provider,
             assume_yes=assume_yes,
-            noninteractive_command="claude-session-scheduler doctor --yes",
+            noninteractive_command=f"prompt-scheduler doctor --provider {active_provider} --yes",
         )
         if installed:
-            claude = shutil.which("claude")
+            executables = _provider_executables()
             launchctl = shutil.which("launchctl")
             print()
-            ok = _print_doctor_checks(paths, claude=claude, launchctl=launchctl)
+            payload = _status_payload(
+                paths,
+                provider_selection=provider_selection,
+                executables=executables,
+                launchctl=launchctl,
+            )
+            ok = _print_doctor_checks(payload)
 
     return 0 if ok else 1
 
@@ -463,41 +626,61 @@ def command_doctor(
 def command_setup(
     paths: AppPaths,
     *,
+    provider_selection: str | None = "auto",
     assume_yes: bool = False,
     prompt_install: bool = True,
     json_output: bool = False,
 ) -> int:
     if json_output:
         return command_setup_json(
-            paths, assume_yes=assume_yes, prompt_install=prompt_install
+            paths,
+            provider_selection=provider_selection,
+            assume_yes=assume_yes,
+            prompt_install=prompt_install,
         )
 
-    print("Claude Session Scheduler setup")
+    print("Prompt Scheduler setup")
     print()
     paths.ensure()
-    claude = shutil.which("claude")
+    executables = _provider_executables()
     launchctl = shutil.which("launchctl")
-    ok = _print_doctor_checks(paths, claude=claude, launchctl=launchctl)
+    payload = _status_payload(
+        paths,
+        provider_selection=provider_selection,
+        executables=executables,
+        launchctl=launchctl,
+    )
+    ok = _print_doctor_checks(payload)
 
-    if claude is None and prompt_install:
-        installed = _maybe_install_claude(
+    active_provider = payload["active_provider"]
+    active_status = _active_provider_status(payload)
+    if not active_status.get("available") and prompt_install:
+        installed = _maybe_install_provider(
+            active_provider,
             assume_yes=assume_yes,
-            noninteractive_command="claude-session-scheduler setup --yes",
+            noninteractive_command=f"prompt-scheduler setup --provider {active_provider} --yes",
         )
         if installed:
-            claude = shutil.which("claude")
+            executables = _provider_executables()
             launchctl = shutil.which("launchctl")
             print()
-            ok = _print_doctor_checks(paths, claude=claude, launchctl=launchctl)
+            payload = _status_payload(
+                paths,
+                provider_selection=provider_selection,
+                executables=executables,
+                launchctl=launchctl,
+            )
+            ok = _print_doctor_checks(payload)
 
     jobs = JobStore(paths).list_jobs()
     if not sys.stdin.isatty():
         print()
         print("Next commands:")
         if not ok:
-            print("  claude-session-scheduler setup --yes")
-        print("  claude-session-scheduler add")
-        print("  claude-session-scheduler status")
+            active_provider = payload["active_provider"]
+            print(f"  prompt-scheduler setup --provider {active_provider} --yes")
+        print("  prompt-scheduler add")
+        print("  prompt-scheduler status")
         return 0 if ok else 1
 
     if ok and not jobs:
@@ -514,85 +697,142 @@ def command_setup(
                 dry_run=False,
             )
             return schedule_add(args, paths, interactive=True)
-        print("Create one later with: claude-session-scheduler add")
+        print("Create one later with: prompt-scheduler add")
     elif ok:
         print()
         print(f"Setup complete. {len(jobs)} job(s) configured.")
-        print("Run `claude-session-scheduler status` for an overview.")
+        print("Run `prompt-scheduler status` for an overview.")
     else:
         print()
-        print("Fix the missing checks above, then run `claude-session-scheduler setup` again.")
+        print("Fix the missing checks above, then run `prompt-scheduler setup` again.")
 
     return 0 if ok else 1
 
 
 def command_setup_json(
-    paths: AppPaths, *, assume_yes: bool = False, prompt_install: bool = True
+    paths: AppPaths,
+    *,
+    provider_selection: str | None = "auto",
+    assume_yes: bool = False,
+    prompt_install: bool = True,
 ) -> int:
     paths.ensure()
-    claude = shutil.which("claude")
+    executables = _provider_executables()
     launchctl = shutil.which("launchctl")
-    if claude is None and prompt_install and assume_yes:
-        installed = _maybe_install_claude_json()
+    payload = _status_payload(
+        paths,
+        provider_selection=provider_selection,
+        executables=executables,
+        launchctl=launchctl,
+    )
+    active_provider = payload["active_provider"]
+    active_status = _active_provider_status(payload)
+    if not active_status.get("available") and prompt_install and assume_yes:
+        installed = _maybe_install_provider_json(active_provider)
         if not installed:
-            payload = _status_payload(paths, claude=shutil.which("claude"), launchctl=launchctl)
             payload["ok"] = False
-            payload["error"] = "Claude Code install failed"
+            payload["error"] = f"{provider_spec(active_provider).label} install failed"
             _emit_json(payload)
             return 1
-        claude = shutil.which("claude")
-    payload = _status_payload(paths, claude=claude, launchctl=launchctl)
+        executables = _provider_executables()
+        payload = _status_payload(
+            paths,
+            provider_selection=provider_selection,
+            executables=executables,
+            launchctl=launchctl,
+        )
     ok = _status_checks_ok(payload)
     payload["ok"] = ok
-    if claude is None:
-        payload["next_commands"] = ["claude-session-scheduler setup --yes"]
-    elif payload["claude"].get("authenticated") is not True:
-        payload["next_commands"] = ["claude auth login"]
+    active_provider = payload["active_provider"]
+    active_status = _active_provider_status(payload)
+    if not active_status.get("available"):
+        payload["next_commands"] = [
+            f"prompt-scheduler setup --provider {active_provider} --yes"
+        ]
+    elif active_status.get("authenticated") is not True:
+        payload["next_commands"] = [login_command_text(active_provider)]
     elif not payload["jobs"]:
-        payload["next_commands"] = ["claude-session-scheduler add"]
+        payload["next_commands"] = ["prompt-scheduler add"]
     _emit_json(payload)
     return 0 if ok else 1
 
 
-def _print_doctor_checks(
-    paths: AppPaths, *, claude: str | None, launchctl: str | None
-) -> bool:
-    auth = check_claude_auth(claude)
+def _print_doctor_checks(payload: dict[str, Any]) -> bool:
     checks = []
-    checks.append(("platform macOS", sys.platform == "darwin", sys.platform))
-    checks.append(("claude executable", claude is not None, claude or "missing"))
-    checks.append(("Claude login", auth.authenticated is True, _auth_check_detail(auth)))
-    checks.append(("launchctl", launchctl is not None, launchctl or "missing"))
-    checks.append(("data dir", paths.data_dir.exists(), str(paths.data_dir)))
-    launch_agents_ok = paths.launch_agents_dir.exists() or paths.launch_agents_dir.parent.exists()
-    checks.append(("LaunchAgents dir", launch_agents_ok, str(paths.launch_agents_dir)))
+    checks_payload = payload["checks"]
+    checks.append(("platform macOS", checks_payload["platform_macos"], sys.platform))
+    providers = payload["providers"]
+    for provider in SUPPORTED_PROVIDERS:
+        status = providers[provider]
+        label = provider_spec(provider).label
+        checks.append(
+            (
+                f"{label} executable",
+                status["available"],
+                status["path"] or "missing",
+            )
+        )
+        auth_ok = status.get("authenticated") is True
+        checks.append((f"{label} login", auth_ok, _auth_check_detail(status)))
+    checks.append(
+        (
+            "active provider ready",
+            _provider_is_ready(_active_provider_status(payload)),
+            provider_spec(payload["active_provider"]).label,
+        )
+    )
+    checks.append(
+        (
+            "launchctl",
+            checks_payload["launchctl"],
+            checks_payload["launchctl_path"] or "missing",
+        )
+    )
+    checks.append(("data dir", checks_payload["data_dir"], payload["paths"]["state"]))
+    checks.append(
+        (
+            "LaunchAgents dir",
+            checks_payload["launch_agents_dir"],
+            payload["paths"]["launch_agents"],
+        )
+    )
 
     ok = True
     for label, passed, detail in checks:
-        ok = ok and passed
+        if label.endswith(" executable") or label.endswith(" login"):
+            passed_for_ok = True
+        else:
+            passed_for_ok = passed
+        ok = ok and passed_for_ok
         status = "OK" if passed else "MISSING"
         print(f"{status:7} {label}: {detail}")
     return ok
 
 
-def _auth_check_detail(auth: ClaudeAuthCheck) -> str:
-    if auth.authenticated is True:
-        if auth.auth_method:
-            return f"signed in via {auth.auth_method}"
+def _auth_check_detail(auth: AuthCheck | dict[str, Any]) -> str:
+    authenticated = auth.authenticated if isinstance(auth, AuthCheck) else auth.get("authenticated")
+    auth_method = auth.auth_method if isinstance(auth, AuthCheck) else auth.get("auth_method")
+    error = auth.error if isinstance(auth, AuthCheck) else auth.get("auth_error")
+    if authenticated is True:
+        if auth_method:
+            return f"signed in via {auth_method}"
         return "signed in"
-    if auth.authenticated is False:
-        return auth.error or "sign in required"
-    return auth.error or "unknown"
+    if authenticated is False:
+        return error or "sign in required"
+    return error or "unknown"
 
 
-def _maybe_install_claude(*, assume_yes: bool, noninteractive_command: str) -> bool:
-    command_text = " ".join(CLAUDE_INSTALL_COMMAND)
+def _maybe_install_provider(
+    provider: str, *, assume_yes: bool, noninteractive_command: str
+) -> bool:
+    spec = provider_spec(provider)
+    command_text = " ".join(spec.install_command)
     print()
-    print("Claude Code is required to run scheduled prompts.")
+    print(f"{spec.label} is required to run scheduled prompts with this provider.")
     print(f"Official npm install command: {command_text}")
 
     try:
-        validate_claude_install_prerequisites()
+        validate_provider_install_prerequisites(spec.name)
     except ClaudeInstallError as exc:
         print(f"Cannot install automatically: {exc}", file=sys.stderr)
         print(f"Install manually with: {command_text}", file=sys.stderr)
@@ -601,36 +841,47 @@ def _maybe_install_claude(*, assume_yes: bool, noninteractive_command: str) -> b
     if not assume_yes:
         if not sys.stdin.isatty():
             print(
-                f"Run `{noninteractive_command}` to install Claude Code.",
+                f"Run `{noninteractive_command}` to install {spec.label}.",
                 file=sys.stderr,
             )
             return False
-        answer = input("Install Claude Code now? [y/N] ").strip().lower()
+        answer = input(f"Install {spec.label} now? [y/N] ").strip().lower()
         if answer not in {"y", "yes"}:
-            print("Claude Code install skipped.")
+            print(f"{spec.label} install skipped.")
             return False
 
-    print("Installing Claude Code...")
-    install_claude_code()
-    print("Claude Code install command finished.")
+    print(f"Installing {spec.label}...")
+    install_provider(spec.name)
+    print(f"{spec.label} install command finished.")
+    return True
+
+
+def _maybe_install_claude(*, assume_yes: bool, noninteractive_command: str) -> bool:
+    return _maybe_install_provider(
+        CLAUDE,
+        assume_yes=assume_yes,
+        noninteractive_command=noninteractive_command,
+    )
+
+
+def _maybe_install_provider_json(provider: str) -> bool:
+    try:
+        validate_provider_install_prerequisites(provider)
+        install_provider(provider, quiet=True)
+    except ClaudeInstallError:
+        return False
     return True
 
 
 def _maybe_install_claude_json() -> bool:
-    try:
-        validate_claude_install_prerequisites()
-        install_claude_code(quiet=True)
-    except ClaudeInstallError:
-        return False
-    return True
+    return _maybe_install_provider_json(CLAUDE)
 
 
 def _status_checks_ok(payload: dict[str, Any]) -> bool:
     checks = payload["checks"]
     return bool(
         checks["platform_macos"]
-        and payload["claude"]["available"]
-        and payload["claude"].get("authenticated") is True
+        and _provider_is_ready(_active_provider_status(payload))
         and checks["launchctl"]
         and checks["data_dir"]
         and checks["launch_agents_dir"]
@@ -640,33 +891,39 @@ def _status_checks_ok(payload: dict[str, Any]) -> bool:
 def _status_payload(
     paths: AppPaths,
     *,
+    provider_selection: str | None = "auto",
+    executables: dict[str, str | None] | None = None,
     claude: str | None = None,
     launchctl: str | None = None,
 ) -> dict[str, Any]:
     paths.ensure()
-    if claude is None:
-        claude = shutil.which("claude")
+    if executables is None:
+        executables = _provider_executables()
+    if claude is not None:
+        executables[CLAUDE] = claude
     if launchctl is None:
         launchctl = shutil.which("launchctl")
-    auth = check_claude_auth(claude)
+    providers = {
+        provider: _provider_status(provider, executables.get(provider))
+        for provider in SUPPORTED_PROVIDERS
+    }
+    active_provider = _choose_active_provider(providers, requested=provider_selection)
     jobs = [_job_payload(job) for job in JobStore(paths).list_jobs()]
     state = StateStore(paths).load()
     launch_agents_ok = paths.launch_agents_dir.exists() or paths.launch_agents_dir.parent.exists()
+    ok = bool(
+        sys.platform == "darwin"
+        and _provider_is_ready(providers.get(active_provider))
+        and launchctl
+        and launch_agents_ok
+    )
     return {
-        "ok": bool(
-            sys.platform == "darwin"
-            and claude
-            and auth.authenticated is True
-            and launchctl
-            and launch_agents_ok
-        ),
-        "claude": {
-            "available": claude is not None,
-            "path": claude,
-            "authenticated": auth.authenticated,
-            "auth_method": auth.auth_method,
-            "auth_error": auth.error,
-        },
+        "ok": ok,
+        "active_provider": active_provider,
+        "active_provider_label": provider_spec(active_provider).label,
+        "providers": providers,
+        "claude": providers[CLAUDE],
+        "codex": providers[CODEX],
         "reset": {
             "next_reset_at": state.get("next_reset_at"),
             "next_estimated_reset_at": state.get("next_estimated_reset_at"),
@@ -686,6 +943,7 @@ def _status_payload(
         "checks": {
             "platform_macos": sys.platform == "darwin",
             "launchctl": launchctl is not None,
+            "launchctl_path": launchctl,
             "data_dir": paths.data_dir.exists(),
             "launch_agents_dir": launch_agents_ok,
         },
@@ -694,21 +952,28 @@ def _status_payload(
 
 def _job_payload(job: dict[str, Any]) -> dict[str, Any]:
     schedule = job.get("schedule", {})
-    response_summary = job.get("last_claude_response_summary")
+    provider = normalize_provider(job.get("provider"), default=CLAUDE)
+    response_summary = job.get("last_response_summary") or job.get(
+        "last_claude_response_summary"
+    )
     if not response_summary:
-        response_summary = extract_claude_response_summary(
-            job.get("last_stdout_summary") or ""
+        response_summary = extract_response_summary(
+            job.get("last_stdout_summary") or "",
+            provider=provider,
         )
     return {
         "id": job.get("id"),
         "name": job.get("name"),
         "cwd": job.get("cwd"),
+        "provider": provider,
+        "provider_label": provider_spec(provider).label,
         "schedule": schedule,
         "schedule_label": format_schedule(schedule),
         "status": job.get("status"),
         "last_status": job.get("last_status"),
         "last_run_at": job.get("last_run_at"),
         "last_log_path": job.get("last_log_path"),
+        "last_response_summary": response_summary,
         "last_claude_response_summary": response_summary,
         "run_count": job.get("run_count", 0),
     }
@@ -724,15 +989,24 @@ def command_schedule(args: argparse.Namespace, paths: AppPaths) -> int:
     raise ValueError(f"unknown schedule command: {args.schedule_command}")
 
 
-def _build_job(name: str, cwd: str, prompt: str, schedule: dict[str, Any]) -> dict[str, Any]:
+def _build_job(
+    name: str,
+    cwd: str,
+    prompt: str,
+    schedule: dict[str, Any],
+    *,
+    provider: str = CLAUDE,
+) -> dict[str, Any]:
     cwd_path = Path(cwd).expanduser()
     if not cwd_path.is_dir():
         raise ValueError(f"cwd does not exist or is not a directory: {cwd_path}")
+    provider = normalize_provider(provider, default=CLAUDE)
     return {
         "id": make_job_id(name),
         "name": name,
         "cwd": str(cwd_path.resolve()),
         "prompt": prompt,
+        "provider": provider,
         "schedule": schedule,
         "status": "scheduled",
         "created_at": utc_now_iso(),
@@ -745,7 +1019,8 @@ def schedule_add(
     args: argparse.Namespace, paths: AppPaths, *, interactive: bool = False
 ) -> int:
     name, cwd, prompt, schedule = _resolve_add_inputs(args, interactive=interactive)
-    job = _build_job(name, cwd, prompt, schedule)
+    provider = _provider_for_new_job(getattr(args, "provider", None))
+    job = _build_job(name, cwd, prompt, schedule, provider=provider)
     manager = LaunchdManager(paths)
     result = manager.install(job, dry_run=args.dry_run)
     payload = {
@@ -804,11 +1079,11 @@ def _resolve_add_inputs(
             raise ValueError(
                 "missing required input: "
                 + ", ".join(missing)
-                + ". Run `claude-session-scheduler add` in an interactive terminal "
-                "or provide flags such as `claude-session-scheduler add --name "
+                + ". Run `prompt-scheduler add` in an interactive terminal "
+                "or provide flags such as `prompt-scheduler add --name "
                 '"morning" --daily "09:00" --prompt "..."`.'
             )
-        print("Create a Claude schedule")
+        print("Create a prompt schedule")
         print()
         cwd = _prompt_with_default("Project folder", cwd)
         if not name:
@@ -816,7 +1091,7 @@ def _resolve_add_inputs(
         if not schedule_supplied:
             at, daily, weekly = _prompt_for_schedule()
         if not prompt:
-            prompt = _prompt_required("Claude prompt")
+            prompt = _prompt_required("Prompt")
 
     schedule = parse_schedule(at=at, daily=daily, weekly=weekly)
     return name, cwd, prompt, schedule
@@ -913,14 +1188,26 @@ def command_run(args: argparse.Namespace, paths: AppPaths) -> int:
 
 def command_window(args: argparse.Namespace, paths: AppPaths) -> int:
     if args.window_command == "start-now":
-        return command_start_now(args.cwd, paths, json_output=args.json)
+        return command_start_now(
+            args.cwd,
+            paths,
+            provider_selection=args.provider,
+            json_output=args.json,
+        )
     if args.window_command == "start-at-reset":
         return window_start_at_reset(args, paths)
     raise ValueError(f"unknown window command: {args.window_command}")
 
 
-def command_start_now(cwd: str, paths: AppPaths, *, json_output: bool = False) -> int:
-    result = run_inline_prompt(cwd=cwd, paths=paths)
+def command_start_now(
+    cwd: str,
+    paths: AppPaths,
+    *,
+    provider_selection: str | None = "auto",
+    json_output: bool = False,
+) -> int:
+    provider = _resolve_run_provider(paths, provider_selection=provider_selection)
+    result = run_inline_prompt(cwd=cwd, paths=paths, provider=provider)
     if json_output:
         _emit_json(_run_result_payload(result))
         return result.exit_code
@@ -934,8 +1221,7 @@ def command_start_now(cwd: str, paths: AppPaths, *, json_output: bool = False) -
 
 def command_status(paths: AppPaths, *, json_output: bool = False) -> int:
     paths.ensure()
-    claude = shutil.which("claude")
-    payload = _status_payload(paths, claude=claude)
+    payload = _status_payload(paths)
     if json_output:
         payload["ok"] = _status_checks_ok(payload)
         _emit_json(payload)
@@ -943,9 +1229,14 @@ def command_status(paths: AppPaths, *, json_output: bool = False) -> int:
     state = StateStore(paths).load()
     jobs = JobStore(paths).list_jobs()
 
-    print("Claude Session Scheduler status")
-    print(f"Claude Code: {'OK ' + claude if claude else 'missing'}")
-    print(f"Claude login: {_auth_check_detail(_auth_from_payload(payload))}")
+    print("Prompt Scheduler status")
+    for provider in SUPPORTED_PROVIDERS:
+        status = payload["providers"][provider]
+        label = provider_spec(provider).label
+        path = status["path"]
+        print(f"{label}: {'OK ' + path if path else 'missing'}")
+        print(f"{label} login: {_auth_check_detail(status)}")
+    print(f"Active provider: {payload['active_provider_label']}")
     print(f"Next observed reset: {state.get('next_reset_at', 'unknown')}")
     print(f"Next estimated reset: {state.get('next_estimated_reset_at', 'unknown')}")
     print(f"Jobs: {len(jobs)}")
@@ -982,8 +1273,11 @@ def _run_result_payload(result: Any) -> dict[str, Any]:
             "status": result.status,
             "exit_code": result.exit_code,
             "log_path": str(result.log_path),
+            "provider": result.provider,
+            "provider_label": provider_spec(result.provider).label,
             "reset": result.reset_info,
             "message": result.message,
+            "response_summary": result.claude_response_summary,
             "claude_response_summary": result.claude_response_summary,
         },
     }
@@ -1004,6 +1298,7 @@ def window_start_at_reset(args: argparse.Namespace, paths: AppPaths) -> int:
         args.cwd,
         MINIMAL_WINDOW_PROMPT,
         schedule,
+        provider=_provider_for_new_job(getattr(args, "provider", None)),
     )
     manager = LaunchdManager(paths)
     result = manager.install(job, dry_run=args.dry_run)

@@ -2,24 +2,25 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .auth import AUTH_REQUIRED_EXIT_CODE, check_claude_auth, looks_like_auth_required
+from .auth import AUTH_REQUIRED_EXIT_CODE, check_provider_auth, looks_like_auth_required
 from .ids import make_job_id
 from .launchd import LaunchdManager
 from .paths import AppPaths
+from .providers import CLAUDE, CODEX, find_provider_executable, normalize_provider, provider_spec
 from .reset_parser import looks_like_usage_limit, parse_reset_time
 from .schedules import is_due, is_terminal_once_status
 from .storage import JobStore, StateStore, utc_now_iso
 
 
 MINIMAL_WINDOW_PROMPT = "Reply with exactly OK."
-CLAUDE_SEND_TIMEOUT_SECONDS = 120
+PROVIDER_SEND_TIMEOUT_SECONDS = 120
+CLAUDE_SEND_TIMEOUT_SECONDS = PROVIDER_SEND_TIMEOUT_SECONDS
 ESTIMATED_SESSION_WINDOW = timedelta(hours=5)
 
 
@@ -31,6 +32,7 @@ class RunResult:
     reset_info: dict[str, Any] | None = None
     message: str | None = None
     claude_response_summary: str | None = None
+    provider: str = CLAUDE
 
 
 class RunnerError(RuntimeError):
@@ -48,10 +50,25 @@ def _truncate(value: str, limit: int = 10000) -> str:
     return value[:limit] + "\n...[truncated]..."
 
 
-def extract_claude_response_summary(stdout: str, *, limit: int = 4000) -> str | None:
+def extract_response_summary(
+    stdout: str,
+    *,
+    provider: str = CLAUDE,
+    final_message: str | None = None,
+    limit: int = 4000,
+) -> str | None:
+    if final_message and final_message.strip():
+        return _truncate(final_message.strip(), limit=limit)
+
     text = stdout.strip()
     if not text:
         return None
+
+    normalized = normalize_provider(provider)
+    if normalized == CODEX:
+        summary = _extract_codex_jsonl_summary(text)
+        if summary:
+            return _truncate(summary, limit=limit)
 
     try:
         payload = json.loads(text)
@@ -65,6 +82,60 @@ def extract_claude_response_summary(stdout: str, *, limit: int = 4000) -> str | 
                 return _truncate(value.strip(), limit=limit)
 
     return _truncate(text, limit=limit)
+
+
+def extract_claude_response_summary(stdout: str, *, limit: int = 4000) -> str | None:
+    return extract_response_summary(stdout, provider=CLAUDE, limit=limit)
+
+
+def _extract_codex_jsonl_summary(text: str) -> str | None:
+    summaries: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        summary = _text_from_nested_payload(payload)
+        if summary:
+            summaries.append(summary)
+    if summaries:
+        return summaries[-1]
+    return None
+
+
+def _text_from_nested_payload(payload: Any) -> str | None:
+    if isinstance(payload, str):
+        return payload.strip() or None
+    if isinstance(payload, list):
+        parts = [_text_from_nested_payload(item) for item in payload]
+        text = "\n".join(part for part in parts if part)
+        return text or None
+    if not isinstance(payload, dict):
+        return None
+
+    event_type = str(payload.get("type") or payload.get("event") or "").lower()
+    preferred = (
+        "final",
+        "agent_message",
+        "assistant_message",
+        "message",
+        "response",
+    )
+    if event_type and not any(marker in event_type for marker in preferred):
+        nested = payload.get("payload") or payload.get("data")
+        return _text_from_nested_payload(nested)
+
+    for key in ("text", "message", "content", "final_message", "last_message", "response"):
+        value = payload.get(key)
+        summary = _text_from_nested_payload(value)
+        if summary:
+            return summary
+
+    nested = payload.get("payload") or payload.get("data") or payload.get("item")
+    return _text_from_nested_payload(nested)
 
 
 class JobLock:
@@ -103,6 +174,7 @@ def _write_log(
     with log_path.open("w", encoding="utf-8") as handle:
         handle.write(f"job_id: {job.get('id')}\n")
         handle.write(f"name: {job.get('name')}\n")
+        handle.write(f"provider: {_job_provider(job)}\n")
         handle.write(f"cwd: {job.get('cwd')}\n")
         handle.write(f"status: {status}\n")
         handle.write(f"exit_code: {exit_code}\n")
@@ -132,16 +204,24 @@ def _status_from_result(exit_code: int, combined_output: str) -> str:
     return "failed"
 
 
-def _message_from_result(status: str, exit_code: int, stdout: str, stderr: str) -> str | None:
+def _message_from_result(
+    status: str,
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    *,
+    provider: str = CLAUDE,
+) -> str | None:
+    label = provider_spec(provider).label
     if status == "success":
         return None
     if status == "timed_out":
-        return "Claude did not finish within the timeout."
+        return f"{label} did not finish within the timeout."
     output = (stderr or stdout).strip()
     if output:
         return _truncate(output, limit=500)
     if status == "failed":
-        return f"Claude exited with code {exit_code}."
+        return f"{label} exited with code {exit_code}."
     return None
 
 
@@ -174,11 +254,84 @@ def _record_success_estimate(paths: AppPaths, started_at: str) -> None:
     )
 
 
+def _job_provider(job: dict[str, Any]) -> str:
+    return normalize_provider(job.get("provider"), default=CLAUDE)
+
+
+def _provider_executable(
+    provider: str,
+    *,
+    provider_bin: str | None,
+    claude_bin: str | None,
+    codex_bin: str | None,
+) -> str | None:
+    if provider_bin:
+        return provider_bin
+    if provider == CLAUDE and claude_bin:
+        return claude_bin
+    if provider == CODEX and codex_bin:
+        return codex_bin
+    return find_provider_executable(provider)
+
+
+def _codex_response_path(paths: AppPaths, job_id: str, timestamp: str) -> Path:
+    return paths.logs_dir / f"{job_id}-{timestamp}.response.txt"
+
+
+def _build_prompt_command(
+    provider: str,
+    executable: str,
+    *,
+    cwd: Path,
+    prompt: str,
+    response_path: Path | None,
+) -> list[str]:
+    if provider == CLAUDE:
+        return [
+            executable,
+            "-p",
+            "--max-turns",
+            "1",
+            "--no-session-persistence",
+            "--output-format",
+            "json",
+            prompt,
+        ]
+    if provider == CODEX:
+        command = [
+            executable,
+            "--ask-for-approval",
+            "never",
+            "exec",
+            "--cd",
+            str(cwd),
+            "--skip-git-repo-check",
+            "--sandbox",
+            "workspace-write",
+            "--ephemeral",
+            "--color",
+            "never",
+        ]
+        if response_path is not None:
+            command.extend(["--output-last-message", str(response_path)])
+        command.append(prompt)
+        return command
+    raise RunnerError(f"unsupported provider: {provider}")
+
+
+def _read_response_path(path: Path | None) -> str | None:
+    if path is None or not path.exists():
+        return None
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
 def _execute_job(
     job: dict[str, Any],
     *,
     paths: AppPaths,
+    provider_bin: str | None = None,
     claude_bin: str | None = None,
+    codex_bin: str | None = None,
     now: datetime | None = None,
     persist: bool = True,
     cleanup_launchd: bool = True,
@@ -186,8 +339,11 @@ def _execute_job(
     paths.ensure()
     store = JobStore(paths)
     job_id = job["id"]
-    log_path = paths.logs_dir / f"{job_id}-{_timestamp_for_filename(now)}.log"
+    timestamp = _timestamp_for_filename(now)
+    log_path = paths.logs_dir / f"{job_id}-{timestamp}.log"
     schedule_type = job.get("schedule", {}).get("type")
+    provider = _job_provider(job)
+    spec = provider_spec(provider)
 
     try:
         with JobLock(paths, job_id):
@@ -204,7 +360,13 @@ def _execute_job(
                     note="one-time job already completed",
                 )
                 _cleanup_once(job, paths, cleanup_launchd)
-                return RunResult("skipped", 0, log_path, message="one-time job already completed")
+                return RunResult(
+                    "skipped",
+                    0,
+                    log_path,
+                    message="one-time job already completed",
+                    provider=provider,
+                )
 
             if not is_due(job, now):
                 _write_log(
@@ -215,7 +377,13 @@ def _execute_job(
                     exit_code=0,
                     note="one-time job is not due yet",
                 )
-                return RunResult("skipped", 0, log_path, message="one-time job is not due yet")
+                return RunResult(
+                    "skipped",
+                    0,
+                    log_path,
+                    message="one-time job is not due yet",
+                    provider=provider,
+                )
 
             cwd = Path(job["cwd"]).expanduser()
             if not cwd.is_dir():
@@ -237,12 +405,18 @@ def _execute_job(
                     1,
                     log_path,
                     message=f"cwd does not exist or is not a directory: {cwd}",
+                    provider=provider,
                 )
 
-            claude = claude_bin or shutil.which("claude")
-            if not claude:
+            executable = _provider_executable(
+                provider,
+                provider_bin=provider_bin,
+                claude_bin=claude_bin,
+                codex_bin=codex_bin,
+            )
+            if not executable:
                 status = "failed"
-                stderr = "claude executable was not found on PATH"
+                stderr = f"{spec.executable} executable was not found on PATH"
                 _write_log(
                     log_path,
                     job=job,
@@ -253,12 +427,12 @@ def _execute_job(
                 )
                 _update_after_run(store, job, status, 127, log_path, "", stderr, persist)
                 _cleanup_once(job, paths, cleanup_launchd)
-                return RunResult(status, 127, log_path, message=stderr)
+                return RunResult(status, 127, log_path, message=stderr, provider=provider)
 
-            auth = check_claude_auth(claude)
+            auth = check_provider_auth(provider, executable)
             if auth.authenticated is False:
                 status = "auth_required"
-                stderr = auth.error or "Claude login required. Run `claude auth login`."
+                stderr = auth.error or f"{spec.label} login required."
                 _write_log(
                     log_path,
                     job=job,
@@ -266,7 +440,7 @@ def _execute_job(
                     status=status,
                     exit_code=AUTH_REQUIRED_EXIT_CODE,
                     stderr=stderr,
-                    note="Claude authentication is required before sending prompts.",
+                    note=f"{spec.label} authentication is required before sending prompts.",
                 )
                 _update_after_run(
                     store,
@@ -279,31 +453,41 @@ def _execute_job(
                     persist,
                 )
                 _cleanup_once(job, paths, cleanup_launchd)
-                return RunResult(status, AUTH_REQUIRED_EXIT_CODE, log_path, message=stderr)
+                return RunResult(
+                    status,
+                    AUTH_REQUIRED_EXIT_CODE,
+                    log_path,
+                    message=stderr,
+                    provider=provider,
+                )
 
-            command = [
-                claude,
-                "-p",
-                "--max-turns",
-                "1",
-                "--no-session-persistence",
-                "--output-format",
-                "json",
-                job["prompt"],
-            ]
+            response_path = _codex_response_path(paths, job_id, timestamp) if provider == CODEX else None
+            command = _build_prompt_command(
+                provider,
+                executable,
+                cwd=cwd,
+                prompt=job["prompt"],
+                response_path=response_path,
+            )
             try:
                 completed = subprocess.run(
                     command,
                     cwd=str(cwd),
                     text=True,
                     capture_output=True,
-                    timeout=CLAUDE_SEND_TIMEOUT_SECONDS,
+                    timeout=PROVIDER_SEND_TIMEOUT_SECONDS,
                 )
             except subprocess.TimeoutExpired as exc:
                 status = "timed_out"
                 stdout = _timeout_output(exc.stdout)
                 stderr = _timeout_output(exc.stderr)
-                message = "Claude did not finish within the timeout."
+                final_message = _read_response_path(response_path)
+                response_summary = extract_response_summary(
+                    stdout,
+                    provider=provider,
+                    final_message=final_message,
+                )
+                message = f"{spec.label} did not finish within the timeout."
                 stderr = f"{stderr}\n{message}".strip()
                 _write_log(
                     log_path,
@@ -321,16 +505,23 @@ def _execute_job(
                     124,
                     log_path,
                     message=message,
-                    claude_response_summary=extract_claude_response_summary(stdout),
+                    claude_response_summary=response_summary,
+                    provider=provider,
                 )
             stdout = completed.stdout or ""
             stderr = completed.stderr or ""
             combined = f"{stdout}\n{stderr}"
+            final_message = _read_response_path(response_path)
+            response_summary = extract_response_summary(
+                stdout,
+                provider=provider,
+                final_message=final_message,
+            )
             reset_info = parse_reset_time(combined)
             status = _status_from_result(completed.returncode, combined)
             if reset_info:
                 StateStore(paths).record_reset(reset_info)
-            elif status == "success":
+            elif status == "success" and provider == CLAUDE:
                 _record_success_estimate(paths, started_at)
             _write_log(
                 log_path,
@@ -350,6 +541,8 @@ def _execute_job(
                 stdout,
                 stderr,
                 persist,
+                provider=provider,
+                response_summary=response_summary,
             )
             _cleanup_once(job, paths, cleanup_launchd)
             return RunResult(
@@ -357,8 +550,15 @@ def _execute_job(
                 completed.returncode,
                 log_path,
                 reset_info,
-                _message_from_result(status, completed.returncode, stdout, stderr),
-                extract_claude_response_summary(stdout),
+                _message_from_result(
+                    status,
+                    completed.returncode,
+                    stdout,
+                    stderr,
+                    provider=provider,
+                ),
+                response_summary,
+                provider,
             )
     except RunnerError:
         _write_log(
@@ -369,7 +569,13 @@ def _execute_job(
             exit_code=2,
             note="job is already running",
         )
-        return RunResult("overlap_skipped", 2, log_path, message="job is already running")
+        return RunResult(
+            "overlap_skipped",
+            2,
+            log_path,
+            message="job is already running",
+            provider=provider,
+        )
 
 
 def _update_after_run(
@@ -381,15 +587,23 @@ def _update_after_run(
     stdout: str,
     stderr: str,
     persist: bool,
+    *,
+    provider: str | None = None,
+    response_summary: str | None = None,
 ) -> None:
+    provider = normalize_provider(provider or job.get("provider"), default=CLAUDE)
+    if response_summary is None:
+        response_summary = extract_response_summary(stdout, provider=provider)
     job.pop("_started_at", None)
+    job["provider"] = provider
     job["last_status"] = status
     job["last_run_at"] = utc_now_iso()
     job["last_exit_code"] = exit_code
     job["last_log_path"] = str(log_path)
     job["last_stdout_summary"] = _truncate(stdout)
     job["last_stderr_summary"] = _truncate(stderr)
-    job["last_claude_response_summary"] = extract_claude_response_summary(stdout)
+    job["last_response_summary"] = response_summary
+    job["last_claude_response_summary"] = response_summary
     job["run_count"] = int(job.get("run_count", 0)) + 1
     if job.get("schedule", {}).get("type") == "once":
         job["status"] = "completed" if status == "success" else status
@@ -407,7 +621,9 @@ def run_job(
     job_id: str,
     *,
     paths: AppPaths | None = None,
+    provider_bin: str | None = None,
     claude_bin: str | None = None,
+    codex_bin: str | None = None,
     now: datetime | None = None,
     cleanup_launchd: bool = True,
 ) -> RunResult:
@@ -418,7 +634,9 @@ def run_job(
     return _execute_job(
         job,
         paths=paths,
+        provider_bin=provider_bin,
         claude_bin=claude_bin,
+        codex_bin=codex_bin,
         now=now,
         persist=True,
         cleanup_launchd=cleanup_launchd,
@@ -430,14 +648,19 @@ def run_inline_prompt(
     cwd: str,
     prompt: str = MINIMAL_WINDOW_PROMPT,
     paths: AppPaths | None = None,
+    provider: str = CLAUDE,
+    provider_bin: str | None = None,
     claude_bin: str | None = None,
+    codex_bin: str | None = None,
 ) -> RunResult:
+    provider = normalize_provider(provider, default=CLAUDE)
     paths = paths or AppPaths.from_env()
     job = {
         "id": make_job_id("manual-window-start"),
         "name": "manual-window-start",
         "cwd": cwd,
         "prompt": prompt,
+        "provider": provider,
         "schedule": {"type": "manual"},
         "status": "manual",
         "created_at": utc_now_iso(),
@@ -446,7 +669,9 @@ def run_inline_prompt(
     return _execute_job(
         job,
         paths=paths,
+        provider_bin=provider_bin,
         claude_bin=claude_bin,
+        codex_bin=codex_bin,
         persist=False,
         cleanup_launchd=False,
     )

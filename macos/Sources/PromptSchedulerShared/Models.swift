@@ -46,7 +46,11 @@ public enum JSONValue: Codable, Equatable, Sendable {
 
 public struct AppStatus: Codable, Equatable, Sendable {
     public var ok: Bool
-    public var claude: ClaudeStatus
+    public var activeProvider: String?
+    public var activeProviderLabel: String?
+    public var providers: [String: ProviderStatus]?
+    public var claude: ProviderStatus
+    public var codex: ProviderStatus?
     public var reset: ResetStatus
     public var jobs: [ScheduleJob]
     public var paths: SchedulerPaths
@@ -55,22 +59,32 @@ public struct AppStatus: Codable, Equatable, Sendable {
     public var nextCommands: [String]?
 
     enum CodingKeys: String, CodingKey {
-        case ok, claude, reset, jobs, paths, checks, error
+        case ok, providers, claude, codex, reset, jobs, paths, checks, error
+        case activeProvider = "active_provider"
+        case activeProviderLabel = "active_provider_label"
         case nextCommands = "next_commands"
     }
 }
 
-public struct ClaudeStatus: Codable, Equatable, Sendable {
+public typealias ClaudeStatus = ProviderStatus
+
+public struct ProviderStatus: Codable, Equatable, Sendable {
     public var available: Bool
     public var path: String?
     public var authenticated: Bool?
     public var authMethod: String?
     public var authError: String?
+    public var loginCommand: String?
+    public var installCommand: String?
+    public var label: String?
 
     enum CodingKeys: String, CodingKey {
         case available, path, authenticated
         case authMethod = "auth_method"
         case authError = "auth_error"
+        case loginCommand = "login_command"
+        case installCommand = "install_command"
+        case label
     }
 }
 
@@ -126,12 +140,14 @@ public struct SchedulerPaths: Codable, Equatable, Sendable {
 public struct SetupChecks: Codable, Equatable, Sendable {
     public var platformMacos: Bool
     public var launchctl: Bool
+    public var launchctlPath: String?
     public var dataDir: Bool
     public var launchAgentsDir: Bool
 
     enum CodingKeys: String, CodingKey {
         case platformMacos = "platform_macos"
         case launchctl
+        case launchctlPath = "launchctl_path"
         case dataDir = "data_dir"
         case launchAgentsDir = "launch_agents_dir"
     }
@@ -141,21 +157,26 @@ public struct ScheduleJob: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     public var name: String?
     public var cwd: String?
+    public var provider: String?
+    public var providerLabel: String?
     public var schedule: JSONValue?
     public var scheduleLabel: String?
     public var status: String?
     public var lastStatus: String?
     public var lastRunAt: String?
     public var lastLogPath: String?
+    public var lastResponseSummary: String?
     public var lastClaudeResponseSummary: String?
     public var runCount: Int?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, cwd, schedule, status
+        case id, name, cwd, provider, schedule, status
+        case providerLabel = "provider_label"
         case scheduleLabel = "schedule_label"
         case lastStatus = "last_status"
         case lastRunAt = "last_run_at"
         case lastLogPath = "last_log_path"
+        case lastResponseSummary = "last_response_summary"
         case lastClaudeResponseSummary = "last_claude_response_summary"
         case runCount = "run_count"
     }
@@ -171,14 +192,19 @@ public struct RunResult: Codable, Equatable, Sendable {
     public var status: String
     public var exitCode: Int
     public var logPath: String
+    public var provider: String?
+    public var providerLabel: String?
     public var reset: JSONValue?
     public var message: String?
+    public var responseSummary: String?
     public var claudeResponseSummary: String?
 
     enum CodingKeys: String, CodingKey {
-        case status, reset, message
+        case status, provider, reset, message
         case exitCode = "exit_code"
         case logPath = "log_path"
+        case providerLabel = "provider_label"
+        case responseSummary = "response_summary"
         case claudeResponseSummary = "claude_response_summary"
     }
 }

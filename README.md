@@ -1,7 +1,7 @@
-# Claude Session Scheduler
+# Prompt Scheduler
 
-Lightweight local macOS CLI for scheduling Claude Code prompts through user-level
-`launchd`.
+Lightweight local macOS CLI for scheduling Claude Code or Codex prompts through
+user-level `launchd`.
 
 ## Install for development
 
@@ -12,80 +12,96 @@ python3 -m pip install -e .
 ## Happy path
 
 ```bash
-claude-session-scheduler setup
-claude-session-scheduler add
-claude-session-scheduler status
+prompt-scheduler setup
+prompt-scheduler add
+prompt-scheduler status
 ```
 
-`setup` checks your Mac, helps install Claude Code if it is missing, and offers
-to create your first schedule.
+`setup` checks your Mac, helps install a missing prompt provider, and offers to
+create your first schedule. Existing schedules without a provider keep using
+Claude Code; pass `--provider codex` for Codex schedules.
 
 ## Common commands
 
 ```bash
-claude-session-scheduler setup
+prompt-scheduler setup
 
-claude-session-scheduler add \
+prompt-scheduler add \
+  --provider codex \
   --name morning-review \
   --cwd /path/to/project \
   --daily "09:00" \
   --prompt "Review TODOs and summarize risks."
 
-claude-session-scheduler list
-claude-session-scheduler remove JOB_ID
-claude-session-scheduler status
-claude-session-scheduler logs JOB_ID
+prompt-scheduler list
+prompt-scheduler remove JOB_ID
+prompt-scheduler status
+prompt-scheduler logs JOB_ID
 
-claude-session-scheduler start-now --cwd /path/to/project
-claude-session-scheduler start-at-reset --cwd /path/to/project
-claude-session-scheduler install-statusline
+prompt-scheduler start-now --provider codex --cwd /path/to/project
+prompt-scheduler start-at-reset --cwd /path/to/project
+prompt-scheduler install-statusline
 ```
 
 The older nested commands still work for scripts:
 
 ```bash
-claude-session-scheduler doctor
+prompt-scheduler doctor
 
-claude-session-scheduler schedule add \
+prompt-scheduler schedule add \
+  --provider codex \
   --name morning-review \
   --cwd /path/to/project \
   --daily "09:00" \
   --prompt "Review TODOs and summarize risks."
 
-claude-session-scheduler schedule list
-claude-session-scheduler schedule remove JOB_ID
-claude-session-scheduler logs JOB_ID
+prompt-scheduler schedule list
+prompt-scheduler schedule remove JOB_ID
+prompt-scheduler logs JOB_ID
 
-claude-session-scheduler window start-now --cwd /path/to/project
-claude-session-scheduler window start-at-reset --cwd /path/to/project
+prompt-scheduler window start-now --provider codex --cwd /path/to/project
+prompt-scheduler window start-at-reset --cwd /path/to/project
 ```
 
-If `setup` cannot find Claude Code, it will ask whether to install it using
-Anthropic's standard npm command:
+If `setup` cannot find the selected provider, it will ask whether to install it
+using npm. Claude Code uses:
 
 ```bash
 npm install -g @anthropic-ai/claude-code
 ```
 
+Codex uses:
+
+```bash
+npm install -g @openai/codex
+```
+
 For non-interactive setup:
 
 ```bash
-claude-session-scheduler setup --yes
+prompt-scheduler setup --yes
+prompt-scheduler setup --provider codex --yes
 ```
 
-Scheduled jobs run:
+Claude Code jobs run:
 
 ```bash
 claude -p --max-turns 1 --no-session-persistence --output-format json "<prompt>"
 ```
 
-The session starter sends a tiny prompt:
+Codex jobs run non-interactively with an ephemeral session:
+
+```bash
+codex exec --cd /path/to/project --skip-git-repo-check --ask-for-approval never --sandbox workspace-write --ephemeral "<prompt>"
+```
+
+The manual session starter sends a tiny prompt:
 
 ```text
 Reply with exactly OK.
 ```
 
-## Claude login
+## Provider login
 
 The scheduler checks `claude auth status --json` separately from the Claude Code
 install check. If Claude Code is installed but not signed in, setup/status report
@@ -98,12 +114,21 @@ Sign in with:
 claude auth login
 ```
 
+For Codex, the scheduler checks `codex login status`. Sign in with:
+
+```bash
+codex login
+```
+
+Set `PROMPT_SCHEDULER_PROVIDER=codex` to make Codex the default provider for new
+CLI-created schedules, or pass `--provider codex` per command.
+
 ## Local state
 
 State is stored in:
 
 ```text
-~/.local/share/claude-session-scheduler/
+~/.local/share/prompt-scheduler/
 ```
 
 LaunchAgents are installed in:
@@ -115,20 +140,20 @@ LaunchAgents are installed in:
 For tests or isolated development, these can be overridden:
 
 ```bash
-CLAUDE_SESSION_SCHEDULER_HOME=/tmp/css-state
-CLAUDE_SESSION_SCHEDULER_LAUNCH_AGENTS_DIR=/tmp/css-agents
+PROMPT_SCHEDULER_HOME=/tmp/prompt-scheduler-state
+PROMPT_SCHEDULER_LAUNCH_AGENTS_DIR=/tmp/prompt-scheduler-agents
 ```
 
 ## Reset detection
 
-The tool records observed reset times when Claude explicitly reports them in
+The tool records observed reset times when a provider explicitly reports them in
 command output, such as `usage limit reached, resets at 5:00 PM`.
 
 For current Claude Code subscription usage, install the optional status-line
 bridge:
 
 ```bash
-claude-session-scheduler install-statusline
+prompt-scheduler install-statusline
 ```
 
 Claude Code then sends its status-line JSON to the scheduler after API
@@ -138,6 +163,6 @@ next observed reset. If you already have a custom Claude Code status line,
 `install-statusline` will refuse to overwrite it unless you pass `--force`.
 
 It also records an estimated reset after a successful scheduler-started Claude
-session. The estimate assumes a five-hour usage window and is labeled separately
-from observed resets. The status-line bridge is preferred when available because
-it uses Claude Code's own `rate_limits` data.
+Code session. The estimate assumes a five-hour usage window and is labeled
+separately from observed resets. The status-line bridge is preferred when
+available because it uses Claude Code's own `rate_limits` data.

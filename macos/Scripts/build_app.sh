@@ -3,11 +3,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MACOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-APP_NAME="Claude Session Scheduler"
-PRODUCT_NAME="ClaudeSessionSchedulerUI"
+APP_NAME="Prompt Scheduler"
+PRODUCT_NAME="PromptSchedulerUI"
 APP_DIR="${MACOS_DIR}/.build/${APP_NAME}.app"
-LOGO_PATH="${MACOS_DIR}/Sources/ClaudeSessionSchedulerUI/Resources/AppLogo.png"
-ICON_PATH="${MACOS_DIR}/Sources/ClaudeSessionSchedulerUI/Resources/AppIcon.icns"
+LOGO_PATH="${MACOS_DIR}/Sources/PromptSchedulerUI/Resources/AppLogo.png"
+ICON_PATH="${MACOS_DIR}/Sources/PromptSchedulerUI/Resources/AppIcon.icns"
 
 cd "${MACOS_DIR}"
 swift build -c release --product "${PRODUCT_NAME}"
@@ -24,7 +24,7 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key>
   <string>${PRODUCT_NAME}</string>
   <key>CFBundleIdentifier</key>
-  <string>local.claude-session-scheduler</string>
+  <string>local.prompt-scheduler</string>
   <key>CFBundleName</key>
   <string>${APP_NAME}</string>
   <key>CFBundleIconFile</key>

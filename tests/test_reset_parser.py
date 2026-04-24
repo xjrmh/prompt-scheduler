@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from claude_session_scheduler.reset_parser import looks_like_usage_limit, parse_reset_time
+from prompt_scheduler.reset_parser import looks_like_usage_limit, parse_reset_time
 
 
 class ResetParserTests(unittest.TestCase):

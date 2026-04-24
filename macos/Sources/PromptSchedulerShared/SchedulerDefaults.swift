@@ -1,7 +1,7 @@
 import Foundation
 
 public enum SchedulerDefaults {
-    public static let projectFolderName = "Claude Scheduler Project"
+    public static let projectFolderName = "Prompt Scheduler Project"
 
     public static var projectFolderPath: String {
         FileManager.default.homeDirectoryForCurrentUser
