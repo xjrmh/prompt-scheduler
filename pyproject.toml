@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-session-scheduler"
+version = "0.1.0"
+description = "Local macOS CLI scheduler for Claude Code prompts."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Li Zheng" }]
+dependencies = []
+
+[project.scripts]
+claude-session-scheduler = "claude_session_scheduler.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

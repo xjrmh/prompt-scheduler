@@ -1,0 +1,244 @@
+import Foundation
+
+public enum JSONValue: Codable, Equatable, Sendable {
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case object([String: JSONValue])
+    case array([JSONValue])
+    case null
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode([String: JSONValue].self) {
+            self = .object(value)
+        } else {
+            self = .array(try container.decode([JSONValue].self))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let value):
+            try container.encode(value)
+        case .number(let value):
+            try container.encode(value)
+        case .bool(let value):
+            try container.encode(value)
+        case .object(let value):
+            try container.encode(value)
+        case .array(let value):
+            try container.encode(value)
+        case .null:
+            try container.encodeNil()
+        }
+    }
+}
+
+public struct AppStatus: Codable, Equatable, Sendable {
+    public var ok: Bool
+    public var claude: ClaudeStatus
+    public var reset: ResetStatus
+    public var jobs: [ScheduleJob]
+    public var paths: SchedulerPaths
+    public var checks: SetupChecks?
+    public var error: String?
+    public var nextCommands: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case ok, claude, reset, jobs, paths, checks, error
+        case nextCommands = "next_commands"
+    }
+}
+
+public struct ClaudeStatus: Codable, Equatable, Sendable {
+    public var available: Bool
+    public var path: String?
+    public var authenticated: Bool?
+    public var authMethod: String?
+    public var authError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case available, path, authenticated
+        case authMethod = "auth_method"
+        case authError = "auth_error"
+    }
+}
+
+public struct ResetStatus: Codable, Equatable, Sendable {
+    public var nextResetAt: String?
+    public var nextEstimatedResetAt: String?
+    public var lastEstimatedWindowStartedAt: String?
+    public var rateLimits: RateLimits?
+    public var rateLimitsUpdatedAt: String?
+    public var resetSource: String?
+
+    enum CodingKeys: String, CodingKey {
+        case nextResetAt = "next_reset_at"
+        case nextEstimatedResetAt = "next_estimated_reset_at"
+        case lastEstimatedWindowStartedAt = "last_estimated_window_started_at"
+        case rateLimits = "rate_limits"
+        case rateLimitsUpdatedAt = "rate_limits_updated_at"
+        case resetSource = "reset_source"
+    }
+}
+
+public struct RateLimits: Codable, Equatable, Sendable {
+    public var fiveHour: RateLimitWindow?
+    public var sevenDay: RateLimitWindow?
+
+    enum CodingKeys: String, CodingKey {
+        case fiveHour = "five_hour"
+        case sevenDay = "seven_day"
+    }
+}
+
+public struct RateLimitWindow: Codable, Equatable, Sendable {
+    public var usedPercentage: Double?
+    public var resetsAtIso: String?
+
+    enum CodingKeys: String, CodingKey {
+        case usedPercentage = "used_percentage"
+        case resetsAtIso = "resets_at_iso"
+    }
+}
+
+public struct SchedulerPaths: Codable, Equatable, Sendable {
+    public var state: String
+    public var logs: String
+    public var launchAgents: String
+
+    enum CodingKeys: String, CodingKey {
+        case state, logs
+        case launchAgents = "launch_agents"
+    }
+}
+
+public struct SetupChecks: Codable, Equatable, Sendable {
+    public var platformMacos: Bool
+    public var launchctl: Bool
+    public var dataDir: Bool
+    public var launchAgentsDir: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case platformMacos = "platform_macos"
+        case launchctl
+        case dataDir = "data_dir"
+        case launchAgentsDir = "launch_agents_dir"
+    }
+}
+
+public struct ScheduleJob: Codable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var name: String?
+    public var cwd: String?
+    public var schedule: JSONValue?
+    public var scheduleLabel: String?
+    public var status: String?
+    public var lastStatus: String?
+    public var lastRunAt: String?
+    public var lastLogPath: String?
+    public var runCount: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, cwd, schedule, status
+        case scheduleLabel = "schedule_label"
+        case lastStatus = "last_status"
+        case lastRunAt = "last_run_at"
+        case lastLogPath = "last_log_path"
+        case runCount = "run_count"
+    }
+}
+
+public struct LaunchdInfo: Codable, Equatable, Sendable {
+    public var label: String?
+    public var path: String?
+    public var loaded: Bool?
+}
+
+public struct AddScheduleResponse: Codable, Equatable, Sendable {
+    public var ok: Bool
+    public var job: ScheduleJob?
+    public var launchd: LaunchdInfo?
+    public var error: String?
+}
+
+public struct RemoveJobResponse: Codable, Equatable, Sendable {
+    public var ok: Bool
+    public var removed: ScheduleJob?
+    public var error: String?
+}
+
+public struct RunResponse: Codable, Equatable, Sendable {
+    public var ok: Bool
+    public var result: RunResult?
+    public var error: String?
+}
+
+public struct RunResult: Codable, Equatable, Sendable {
+    public var status: String
+    public var exitCode: Int
+    public var logPath: String
+    public var reset: JSONValue?
+    public var message: String?
+
+    enum CodingKeys: String, CodingKey {
+        case status, reset, message
+        case exitCode = "exit_code"
+        case logPath = "log_path"
+    }
+}
+
+public struct LogsResponse: Codable, Equatable, Sendable {
+    public var ok: Bool
+    public var logs: [String]?
+    public var log: LogContent?
+    public var error: String?
+}
+
+public struct LogContent: Codable, Equatable, Sendable {
+    public var path: String
+    public var content: String
+}
+
+public enum ScheduleKind: String, CaseIterable, Identifiable, Sendable {
+    case once
+    case daily
+    case weekly
+
+    public var id: String { rawValue }
+}
+
+public struct ScheduleInput: Equatable, Sendable {
+    public var name: String
+    public var cwd: String
+    public var prompt: String
+    public var kind: ScheduleKind
+    public var value: String
+    public var dryRun: Bool
+
+    public init(
+        name: String,
+        cwd: String,
+        prompt: String,
+        kind: ScheduleKind,
+        value: String,
+        dryRun: Bool = false
+    ) {
+        self.name = name
+        self.cwd = cwd
+        self.prompt = prompt
+        self.kind = kind
+        self.value = value
+        self.dryRun = dryRun
+    }
+}
