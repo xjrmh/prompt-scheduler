@@ -147,6 +147,7 @@ public struct ScheduleJob: Codable, Equatable, Identifiable, Sendable {
     public var lastStatus: String?
     public var lastRunAt: String?
     public var lastLogPath: String?
+    public var lastClaudeResponseSummary: String?
     public var runCount: Int?
 
     enum CodingKeys: String, CodingKey {
@@ -155,27 +156,9 @@ public struct ScheduleJob: Codable, Equatable, Identifiable, Sendable {
         case lastStatus = "last_status"
         case lastRunAt = "last_run_at"
         case lastLogPath = "last_log_path"
+        case lastClaudeResponseSummary = "last_claude_response_summary"
         case runCount = "run_count"
     }
-}
-
-public struct LaunchdInfo: Codable, Equatable, Sendable {
-    public var label: String?
-    public var path: String?
-    public var loaded: Bool?
-}
-
-public struct AddScheduleResponse: Codable, Equatable, Sendable {
-    public var ok: Bool
-    public var job: ScheduleJob?
-    public var launchd: LaunchdInfo?
-    public var error: String?
-}
-
-public struct RemoveJobResponse: Codable, Equatable, Sendable {
-    public var ok: Bool
-    public var removed: ScheduleJob?
-    public var error: String?
 }
 
 public struct RunResponse: Codable, Equatable, Sendable {
@@ -190,11 +173,13 @@ public struct RunResult: Codable, Equatable, Sendable {
     public var logPath: String
     public var reset: JSONValue?
     public var message: String?
+    public var claudeResponseSummary: String?
 
     enum CodingKeys: String, CodingKey {
         case status, reset, message
         case exitCode = "exit_code"
         case logPath = "log_path"
+        case claudeResponseSummary = "claude_response_summary"
     }
 }
 
@@ -208,37 +193,4 @@ public struct LogsResponse: Codable, Equatable, Sendable {
 public struct LogContent: Codable, Equatable, Sendable {
     public var path: String
     public var content: String
-}
-
-public enum ScheduleKind: String, CaseIterable, Identifiable, Sendable {
-    case once
-    case daily
-    case weekly
-
-    public var id: String { rawValue }
-}
-
-public struct ScheduleInput: Equatable, Sendable {
-    public var name: String
-    public var cwd: String
-    public var prompt: String
-    public var kind: ScheduleKind
-    public var value: String
-    public var dryRun: Bool
-
-    public init(
-        name: String,
-        cwd: String,
-        prompt: String,
-        kind: ScheduleKind,
-        value: String,
-        dryRun: Bool = false
-    ) {
-        self.name = name
-        self.cwd = cwd
-        self.prompt = prompt
-        self.kind = kind
-        self.value = value
-        self.dryRun = dryRun
-    }
 }

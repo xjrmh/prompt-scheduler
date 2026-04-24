@@ -55,32 +55,6 @@ public final class EngineClient: Sendable {
         return try await runJSON(args, as: AppStatus.self)
     }
 
-    public func addSchedule(_ input: ScheduleInput) async throws -> AddScheduleResponse {
-        var args = [
-            "add",
-            "--name", input.name,
-            "--cwd", input.cwd,
-            "--prompt", input.prompt,
-            "--json"
-        ]
-        switch input.kind {
-        case .once:
-            args.append(contentsOf: ["--at", input.value])
-        case .daily:
-            args.append(contentsOf: ["--daily", input.value])
-        case .weekly:
-            args.append(contentsOf: ["--weekly", input.value])
-        }
-        if input.dryRun {
-            args.append("--dry-run")
-        }
-        return try await runJSON(args, as: AddScheduleResponse.self)
-    }
-
-    public func removeJob(id: String) async throws -> RemoveJobResponse {
-        try await runJSON(["remove", id, "--json"], as: RemoveJobResponse.self)
-    }
-
     public func startNow(cwd: String) async throws -> RunResponse {
         try await runJSON(["start-now", "--cwd", cwd, "--json"], as: RunResponse.self)
     }
@@ -103,7 +77,7 @@ public final class EngineClient: Sendable {
         let command = makeCommand(arguments: arguments)
         let result = try await runProcess(command)
         guard !result.stdout.isEmpty else {
-            throw EngineClientError.invalidOutput("The scheduler returned no JSON output.")
+            throw EngineClientError.invalidOutput("The CLI returned no JSON output.")
         }
         do {
             return try decoder.decode(T.self, from: result.stdout)
@@ -111,7 +85,7 @@ public final class EngineClient: Sendable {
             let text = String(data: result.stdout, encoding: .utf8) ?? ""
             if result.exitCode != 0,
                let response = try? decoder.decode(ErrorResponse.self, from: result.stdout) {
-                throw EngineClientError.commandFailed(response.error ?? "The scheduler command failed.")
+                throw EngineClientError.commandFailed(response.error ?? "The CLI command failed.")
             }
             throw EngineClientError.invalidOutput(text)
         }

@@ -33,6 +33,7 @@ final class EngineClientTests: XCTestCase {
               "schedule": {"type": "daily", "time": "09:00"},
               "schedule_label": "daily at 09:00",
               "status": "scheduled",
+              "last_claude_response_summary": "OK",
               "run_count": 0
             }
           ],
@@ -60,10 +61,11 @@ final class EngineClientTests: XCTestCase {
         XCTAssertEqual(status.reset.rateLimits?.fiveHour?.usedPercentage, 41.8)
         XCTAssertEqual(status.reset.rateLimits?.fiveHour?.resetsAtIso, "2026-04-25T09:00:00-04:00")
         XCTAssertEqual(status.jobs.first?.scheduleLabel, "daily at 09:00")
+        XCTAssertEqual(status.jobs.first?.lastClaudeResponseSummary, "OK")
         XCTAssertEqual(status.paths.launchAgents, "/tmp/agents")
     }
 
-    func testBuildsAddScheduleCommand() async throws {
+    func testBuildsStartNowCommand() async throws {
         let client = EngineClient(
             commandResolver: {
                 EngineCommand(executable: "/usr/local/bin/claude-session-scheduler")
@@ -73,33 +75,23 @@ final class EngineClientTests: XCTestCase {
                 XCTAssertEqual(
                     command.arguments,
                     [
-                        "add",
-                        "--name", "Morning",
+                        "start-now",
                         "--cwd", "/tmp/project",
-                        "--prompt", "hello",
-                        "--json",
-                        "--daily", "09:00"
+                        "--json"
                     ]
                 )
                 return ProcessResult(
                     exitCode: 0,
-                    stdout: #"{"ok":true,"job":{"id":"job-1234","name":"Morning","schedule_label":"daily at 09:00"},"launchd":{"loaded":true}}"#.data(using: .utf8)!
+                    stdout: #"{"ok":true,"result":{"status":"success","exit_code":0,"log_path":"/tmp/run.log","message":"done","claude_response_summary":"OK"}}"#.data(using: .utf8)!
                 )
             }
         )
 
-        let response = try await client.addSchedule(
-            ScheduleInput(
-                name: "Morning",
-                cwd: "/tmp/project",
-                prompt: "hello",
-                kind: .daily,
-                value: "09:00"
-            )
-        )
+        let response = try await client.startNow(cwd: "/tmp/project")
 
         XCTAssertTrue(response.ok)
-        XCTAssertEqual(response.job?.id, "job-1234")
+        XCTAssertEqual(response.result?.status, "success")
+        XCTAssertEqual(response.result?.claudeResponseSummary, "OK")
     }
 
     func testDefaultCommandUsesEnvironmentOverride() {

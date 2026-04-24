@@ -18,7 +18,13 @@ from .installer import (
 )
 from .launchd import LaunchdError, LaunchdManager
 from .paths import AppPaths
-from .runner import MINIMAL_WINDOW_PROMPT, RunnerError, run_inline_prompt, run_job
+from .runner import (
+    MINIMAL_WINDOW_PROMPT,
+    RunnerError,
+    extract_claude_response_summary,
+    run_inline_prompt,
+    run_job,
+)
 from .schedules import ScheduleError, format_schedule, parse_once, parse_schedule
 from .storage import JobStore, StateStore, utc_now_iso
 
@@ -688,6 +694,11 @@ def _status_payload(
 
 def _job_payload(job: dict[str, Any]) -> dict[str, Any]:
     schedule = job.get("schedule", {})
+    response_summary = job.get("last_claude_response_summary")
+    if not response_summary:
+        response_summary = extract_claude_response_summary(
+            job.get("last_stdout_summary") or ""
+        )
     return {
         "id": job.get("id"),
         "name": job.get("name"),
@@ -698,6 +709,7 @@ def _job_payload(job: dict[str, Any]) -> dict[str, Any]:
         "last_status": job.get("last_status"),
         "last_run_at": job.get("last_run_at"),
         "last_log_path": job.get("last_log_path"),
+        "last_claude_response_summary": response_summary,
         "run_count": job.get("run_count", 0),
     }
 
@@ -972,6 +984,7 @@ def _run_result_payload(result: Any) -> dict[str, Any]:
             "log_path": str(result.log_path),
             "reset": result.reset_info,
             "message": result.message,
+            "claude_response_summary": result.claude_response_summary,
         },
     }
 

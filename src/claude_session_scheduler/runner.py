@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -29,6 +30,7 @@ class RunResult:
     log_path: Path
     reset_info: dict[str, Any] | None = None
     message: str | None = None
+    claude_response_summary: str | None = None
 
 
 class RunnerError(RuntimeError):
@@ -44,6 +46,25 @@ def _truncate(value: str, limit: int = 10000) -> str:
     if len(value) <= limit:
         return value
     return value[:limit] + "\n...[truncated]..."
+
+
+def extract_claude_response_summary(stdout: str, *, limit: int = 4000) -> str | None:
+    text = stdout.strip()
+    if not text:
+        return None
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return _truncate(text, limit=limit)
+
+    if isinstance(payload, dict):
+        for key in ("result", "response", "message", "error"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return _truncate(value.strip(), limit=limit)
+
+    return _truncate(text, limit=limit)
 
 
 class JobLock:
@@ -295,7 +316,13 @@ def _execute_job(
                 )
                 _update_after_run(store, job, status, 124, log_path, stdout, stderr, persist)
                 _cleanup_once(job, paths, cleanup_launchd)
-                return RunResult(status, 124, log_path, message=message)
+                return RunResult(
+                    status,
+                    124,
+                    log_path,
+                    message=message,
+                    claude_response_summary=extract_claude_response_summary(stdout),
+                )
             stdout = completed.stdout or ""
             stderr = completed.stderr or ""
             combined = f"{stdout}\n{stderr}"
@@ -331,6 +358,7 @@ def _execute_job(
                 log_path,
                 reset_info,
                 _message_from_result(status, completed.returncode, stdout, stderr),
+                extract_claude_response_summary(stdout),
             )
     except RunnerError:
         _write_log(
@@ -361,6 +389,7 @@ def _update_after_run(
     job["last_log_path"] = str(log_path)
     job["last_stdout_summary"] = _truncate(stdout)
     job["last_stderr_summary"] = _truncate(stderr)
+    job["last_claude_response_summary"] = extract_claude_response_summary(stdout)
     job["run_count"] = int(job.get("run_count", 0)) + 1
     if job.get("schedule", {}).get("type") == "once":
         job["status"] = "completed" if status == "success" else status

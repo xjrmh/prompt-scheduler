@@ -1,6 +1,8 @@
 # Claude Session Scheduler macOS UI
 
-Local SwiftUI menu bar prototype for Claude Session Scheduler.
+Local SwiftUI menu bar companion for Claude Session Scheduler.
+Schedule creation and removal stay in the Python CLI; the macOS UI exposes
+Claude setup status, reset information, manual sends, and recent activity.
 
 ## Run
 

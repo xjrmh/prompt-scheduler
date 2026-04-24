@@ -1,4 +1,5 @@
 import CSSShared
+import AppKit
 import SwiftUI
 
 @main
@@ -6,14 +7,16 @@ struct ClaudeSessionSchedulerApp: App {
     @StateObject private var controller = AppController()
 
     var body: some Scene {
-        MenuBarExtra("Claude Scheduler", systemImage: "clock.badge.checkmark") {
+        MenuBarExtra {
             MenuBarContent(controller: controller)
-                .frame(width: 360)
+        } label: {
+            Image(nsImage: MenuBarIcon.image(for: controller.menuBarIconState))
+                .accessibilityLabel(controller.menuBarIconAccessibilityLabel)
         }
-        .menuBarExtraStyle(.window)
+        .menuBarExtraStyle(.menu)
 
-        Window("Claude Scheduler", id: "scheduler") {
-            SchedulerWindow(controller: controller)
+        Window("Claude Status", id: "status") {
+            StatusWindow(controller: controller)
                 .frame(minWidth: 780, minHeight: 560)
                 .task {
                     await controller.refresh()

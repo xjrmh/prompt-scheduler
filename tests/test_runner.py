@@ -52,8 +52,10 @@ class RunnerTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "success")
             self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.claude_response_summary, "ok")
             updated = JobStore(paths).get(job["id"])
             self.assertEqual(updated["run_count"], 1)
+            self.assertEqual(updated["last_claude_response_summary"], "ok")
             self.assertTrue(Path(updated["last_log_path"]).exists())
 
     def test_successful_run_records_estimated_reset(self) -> None:

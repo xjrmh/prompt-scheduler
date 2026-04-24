@@ -1,6 +1,14 @@
 import CSSShared
 import Foundation
 
+enum MenuBarIconState: Equatable {
+    case idle
+    case running
+    case success
+    case warning
+    case failure
+}
+
 struct ManualSendStatus: Equatable {
     enum Tone: Equatable {
         case pending
@@ -17,6 +25,7 @@ struct ManualSendStatus: Equatable {
     var rawStatus: String?
     var exitCode: Int?
     var logPath: String?
+    var responseText: String?
 
     static func sending(timestamp: Date = Date()) -> ManualSendStatus {
         ManualSendStatus(
@@ -32,7 +41,7 @@ struct ManualSendStatus: Equatable {
             return ManualSendStatus(
                 tone: response.ok ? .success : .failure,
                 title: response.ok ? "Send started" : "Send failed",
-                detail: response.error ?? "The scheduler did not return run details.",
+                detail: response.error ?? "The CLI did not return run details.",
                 timestamp: timestamp
             )
         }
@@ -46,7 +55,8 @@ struct ManualSendStatus: Equatable {
             timestamp: timestamp,
             rawStatus: result.status,
             exitCode: result.exitCode,
-            logPath: result.logPath
+            logPath: result.logPath,
+            responseText: cleanMessage(result.claudeResponseSummary)
         )
     }
 
@@ -87,9 +97,9 @@ struct ManualSendStatus: Equatable {
             return (.failure, "Send timed out", "Claude did not finish within the timeout.")
         default:
             if exitCode == 0 {
-                return (.success, "Send finished", "Scheduler status: \(status).")
+                return (.success, "Send finished", "Command status: \(status).")
             }
-            return (.failure, "Send failed", "Scheduler status: \(status). Exit code \(exitCode).")
+            return (.failure, "Send failed", "Command status: \(status). Exit code \(exitCode).")
         }
     }
 
@@ -107,7 +117,6 @@ final class AppController: ObservableObject {
     @Published var isLoading = false
     @Published var message: String?
     @Published var lastManualSend: ManualSendStatus?
-    @Published var showAddSchedule = false
 
     private let engine: EngineClient
 
@@ -127,7 +136,7 @@ final class AppController: ObservableObject {
             return "Claude Code not installed"
         }
         if status.claude.authenticated == true {
-            return "Claude Code is ready"
+            return "Claude CLI: signed in"
         }
         if status.claude.authenticated == false {
             return "Claude login required"
@@ -137,6 +146,45 @@ final class AppController: ObservableObject {
 
     var defaultFolder: String {
         SchedulerDefaults.projectFolderPath
+    }
+
+    var menuBarIconState: MenuBarIconState {
+        if isLoading || lastManualSend?.tone == .pending || hasRunningJob {
+            return .running
+        }
+
+        guard let status else {
+            return .running
+        }
+
+        if status.claude.available != true || status.claude.authenticated != true {
+            return .warning
+        }
+
+        if let sendStatus = lastManualSend {
+            return Self.iconState(for: sendStatus.tone)
+        }
+
+        if let jobStatus = latestJobStatus {
+            return Self.iconState(forStatus: jobStatus)
+        }
+
+        return .idle
+    }
+
+    var menuBarIconAccessibilityLabel: String {
+        switch menuBarIconState {
+        case .idle:
+            "Claude status idle"
+        case .running:
+            "Claude status running"
+        case .success:
+            "Claude status last run succeeded"
+        case .warning:
+            "Claude status needs attention"
+        case .failure:
+            "Claude status last run failed"
+        }
     }
 
     func refresh() async {
@@ -149,27 +197,6 @@ final class AppController: ObservableObject {
         await runTask {
             status = try await engine.setup(install: true)
             message = isReady ? "Claude Code is ready." : "Claude setup is incomplete."
-        }
-    }
-
-    func addSchedule(_ input: ScheduleInput) async {
-        await runTask {
-            try ensureDefaultFolderIfNeeded(input.cwd)
-            let response = try await engine.addSchedule(input)
-            if response.ok {
-                message = "Schedule saved."
-                status = try await engine.status()
-            } else {
-                message = response.error ?? "Could not save schedule."
-            }
-        }
-    }
-
-    func removeJob(id: String) async {
-        await runTask {
-            _ = try await engine.removeJob(id: id)
-            message = "Schedule removed."
-            status = try await engine.status()
         }
     }
 
@@ -222,5 +249,57 @@ final class AppController: ObservableObject {
         if (path as NSString).standardizingPath == (defaultPath as NSString).standardizingPath {
             _ = try SchedulerDefaults.ensureProjectFolder()
         }
+    }
+
+    private var hasRunningJob: Bool {
+        (status?.jobs ?? []).contains { job in
+            let normalized = (job.status ?? "").lowercased()
+            return normalized.contains("running") || normalized.contains("in_progress")
+        }
+    }
+
+    private var latestJobStatus: String? {
+        (status?.jobs ?? [])
+            .filter { $0.lastRunAt != nil || $0.lastStatus != nil }
+            .sorted { ($0.lastRunAt ?? "") > ($1.lastRunAt ?? "") }
+            .compactMap(Self.jobStatusValue)
+            .first
+    }
+
+    private static func jobStatusValue(_ job: ScheduleJob) -> String {
+        job.lastStatus ?? job.status ?? ""
+    }
+
+    private static func iconState(for tone: ManualSendStatus.Tone) -> MenuBarIconState {
+        switch tone {
+        case .pending:
+            .running
+        case .success:
+            .success
+        case .warning, .skipped:
+            .warning
+        case .failure:
+            .failure
+        }
+    }
+
+    private static func iconState(forStatus status: String) -> MenuBarIconState {
+        let normalized = status.lowercased()
+        if normalized.contains("running") || normalized.contains("in_progress") {
+            return .running
+        }
+        if normalized.contains("success") || normalized.contains("ok") || normalized.contains("complete") {
+            return .success
+        }
+        if normalized.contains("fail")
+            || normalized.contains("error")
+            || normalized.contains("timed")
+            || normalized.contains("auth") {
+            return .failure
+        }
+        if normalized.contains("skip") || normalized.contains("limit") || normalized.contains("warn") {
+            return .warning
+        }
+        return .idle
     }
 }

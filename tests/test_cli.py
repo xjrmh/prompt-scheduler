@@ -552,6 +552,37 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["claude"]["authenticated"])
             self.assertIn("claude auth login", payload["claude"]["auth_error"])
 
+    def test_status_json_reports_last_claude_response_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = AppPaths(root / "state", root / "agents")
+            JobStore(paths).add(
+                {
+                    "id": "job-1234",
+                    "name": "Morning",
+                    "cwd": tmp,
+                    "prompt": "hello",
+                    "schedule": {"type": "daily", "time": "09:00"},
+                    "status": "scheduled",
+                    "created_at": utc_now_iso(),
+                    "updated_at": utc_now_iso(),
+                    "last_stdout_summary": "{\"result\":\"Done\"}\n",
+                    "run_count": 1,
+                }
+            )
+            out = StringIO()
+            with patch.dict("os.environ", self._env(root)), patch(
+                "claude_session_scheduler.cli.shutil.which",
+                side_effect=lambda name: "/usr/local/bin/claude" if name == "claude" else "/bin/launchctl",
+            ), patch(
+                "claude_session_scheduler.cli.check_claude_auth", side_effect=self._auth_for_path
+            ), redirect_stdout(out):
+                code = main(["status", "--json"])
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out.getvalue())
+            self.assertEqual(payload["jobs"][0]["last_claude_response_summary"], "Done")
+
     def test_add_json_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = StringIO()
