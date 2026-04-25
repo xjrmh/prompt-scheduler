@@ -575,6 +575,38 @@ class CliTests(unittest.TestCase):
             self.assertEqual(Path(payload["job"]["cwd"]).resolve(), expected.resolve())
             self.assertTrue(expected.is_dir())
 
+    def test_add_persists_model_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = StringIO()
+            with patch.dict("os.environ", self._env(root)), redirect_stdout(out):
+                code = main(
+                    [
+                        "schedule",
+                        "add",
+                        "--name",
+                        "with-models",
+                        "--cwd",
+                        tmp,
+                        "--daily",
+                        "09:00",
+                        "--prompt",
+                        "hello",
+                        "--provider",
+                        "both",
+                        "--claude-model",
+                        "haiku",
+                        "--codex-model",
+                        "gpt-5.3-codex",
+                        "--dry-run",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            payload = json.loads(out.getvalue())
+            self.assertEqual(payload["job"]["claude_model"], "haiku")
+            self.assertEqual(payload["job"]["codex_model"], "gpt-5.3-codex")
+
     def test_interactive_add_daily(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             self._assert_interactive_add(

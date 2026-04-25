@@ -77,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     top_add = subparsers.add_parser("add", help="Add a scheduled prompt.")
     _add_provider_arg(top_add, include_both=True)
     _add_schedule_args(top_add, required=False)
+    _add_model_args(top_add)
     _add_json_flag(top_add)
 
     top_list = subparsers.add_parser("list", help="List scheduled jobs.")
@@ -113,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_provider_arg(start_now, include_auto=True, include_both=True)
     start_now.add_argument("--cwd", default=None)
+    _add_model_args(start_now)
     _add_json_flag(start_now)
 
     start_reset = subparsers.add_parser(
@@ -122,6 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_reset.add_argument("--cwd", default=None)
     start_reset.add_argument("--buffer-minutes", type=int, default=2)
     start_reset.add_argument("--dry-run", action="store_true")
+    _add_model_args(start_reset)
     _add_json_flag(start_reset)
 
     wake_loop = subparsers.add_parser(
@@ -146,6 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prompt text to send on each interval.",
     )
     wake_loop_start.add_argument("--dry-run", action="store_true")
+    _add_model_args(wake_loop_start)
     _add_json_flag(wake_loop_start)
     wake_loop_stop = wake_loop_sub.add_parser(
         "stop", help="Remove the recurring wake-up prompt if installed."
@@ -157,6 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     add = schedule_sub.add_parser("add", help="Add a scheduled prompt.")
     _add_provider_arg(add, include_both=True)
     _add_schedule_args(add, required=True)
+    _add_model_args(add)
     _add_json_flag(add)
 
     nested_list = schedule_sub.add_parser("list", help="List jobs.")
@@ -175,6 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_provider_arg(start_now, include_auto=True, include_both=True)
     start_now.add_argument("--cwd", required=True)
+    _add_model_args(start_now)
     _add_json_flag(start_now)
     start_reset = window_sub.add_parser(
         "start-at-reset", help="Schedule the minimal prompt at the observed reset time."
@@ -183,6 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_reset.add_argument("--cwd", required=True)
     start_reset.add_argument("--buffer-minutes", type=int, default=2)
     start_reset.add_argument("--dry-run", action="store_true")
+    _add_model_args(start_reset)
     _add_json_flag(start_reset)
 
     logs = subparsers.add_parser("logs", help="Show recent logs or one job's latest log.")
@@ -231,6 +238,19 @@ def _add_json_flag(parser: argparse.ArgumentParser) -> None:
         "--json",
         action="store_true",
         help="Print a machine-readable JSON response.",
+    )
+
+
+def _add_model_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--claude-model",
+        default=None,
+        help="Override the Claude Code model (e.g. opus, sonnet, haiku, or a full model id).",
+    )
+    parser.add_argument(
+        "--codex-model",
+        default=None,
+        help="Override the Codex model (e.g. gpt-5.4-mini, gpt-5.3-codex, gpt-5.4).",
     )
 
 
@@ -288,6 +308,8 @@ def main(argv: list[str] | None = None) -> int:
                 paths,
                 provider_selection=args.provider,
                 json_output=args.json,
+                claude_model=getattr(args, "claude_model", None),
+                codex_model=getattr(args, "codex_model", None),
             )
         if args.command == "start-at-reset":
             if args.cwd is None:
@@ -1057,6 +1079,8 @@ def _job_payload(job: dict[str, Any]) -> dict[str, Any]:
         "cwd": job.get("cwd"),
         "provider": provider,
         "provider_label": provider_label(provider),
+        "claude_model": job.get("claude_model"),
+        "codex_model": job.get("codex_model"),
         "schedule": schedule,
         "schedule_label": format_schedule(schedule),
         "status": job.get("status"),
@@ -1086,12 +1110,14 @@ def _build_job(
     schedule: dict[str, Any],
     *,
     provider: str = CLAUDE,
+    claude_model: str | None = None,
+    codex_model: str | None = None,
 ) -> dict[str, Any]:
     cwd_path = Path(cwd).expanduser()
     if not cwd_path.is_dir():
         raise ValueError(f"cwd does not exist or is not a directory: {cwd_path}")
     provider = normalize_provider_selection(provider, default=CLAUDE)
-    return {
+    job: dict[str, Any] = {
         "id": make_job_id(name),
         "name": name,
         "cwd": str(cwd_path.resolve()),
@@ -1103,6 +1129,11 @@ def _build_job(
         "updated_at": utc_now_iso(),
         "run_count": 0,
     }
+    if claude_model:
+        job["claude_model"] = claude_model
+    if codex_model:
+        job["codex_model"] = codex_model
+    return job
 
 
 def schedule_add(
@@ -1114,7 +1145,15 @@ def schedule_add(
         provider = _prompt_for_provider(_provider_for_new_job(None))
     else:
         provider = _provider_for_new_job(requested_provider)
-    job = _build_job(name, cwd, prompt, schedule, provider=provider)
+    job = _build_job(
+        name,
+        cwd,
+        prompt,
+        schedule,
+        provider=provider,
+        claude_model=getattr(args, "claude_model", None),
+        codex_model=getattr(args, "codex_model", None),
+    )
     manager = LaunchdManager(paths)
     result = manager.install(job, dry_run=args.dry_run)
     payload = {
@@ -1298,6 +1337,8 @@ def command_window(args: argparse.Namespace, paths: AppPaths) -> int:
             paths,
             provider_selection=args.provider,
             json_output=args.json,
+            claude_model=getattr(args, "claude_model", None),
+            codex_model=getattr(args, "codex_model", None),
         )
     if args.window_command == "start-at-reset":
         return window_start_at_reset(args, paths)
@@ -1310,9 +1351,17 @@ def command_start_now(
     *,
     provider_selection: str | None = "auto",
     json_output: bool = False,
+    claude_model: str | None = None,
+    codex_model: str | None = None,
 ) -> int:
     provider = _resolve_run_provider(paths, provider_selection=provider_selection)
-    result = run_inline_prompt(cwd=cwd, paths=paths, provider=provider)
+    result = run_inline_prompt(
+        cwd=cwd,
+        paths=paths,
+        provider=provider,
+        claude_model=claude_model,
+        codex_model=codex_model,
+    )
     if json_output:
         _emit_json(_run_result_payload(result))
         return result.exit_code
@@ -1416,6 +1465,8 @@ def window_start_at_reset(args: argparse.Namespace, paths: AppPaths) -> int:
         MINIMAL_WINDOW_PROMPT,
         schedule,
         provider=provider,
+        claude_model=getattr(args, "claude_model", None),
+        codex_model=getattr(args, "codex_model", None),
     )
     manager = LaunchdManager(paths)
     result = manager.install(job, dry_run=args.dry_run)
@@ -1499,6 +1550,8 @@ def _wake_loop_start(args: argparse.Namespace, paths: AppPaths) -> int:
         args.prompt,
         schedule,
         provider=provider,
+        claude_model=getattr(args, "claude_model", None),
+        codex_model=getattr(args, "codex_model", None),
     )
     manager = LaunchdManager(paths)
     result = manager.install(job, dry_run=args.dry_run)

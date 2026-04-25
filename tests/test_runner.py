@@ -132,6 +132,104 @@ printf 'Codex OK\\n' > "$output"
             self.assertNotIn("next_estimated_reset_at", StateStore(paths).load())
             args = args_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(args[:3], ["--ask-for-approval", "never", "exec"])
+            self.assertIn("--model", args)
+            self.assertEqual(args[args.index("--model") + 1], "gpt-5.4-mini")
+
+    def test_codex_model_override_threads_into_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = make_paths(tmp)
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            args_path = Path(tmp) / "codex-args.txt"
+            fake = write_fake_codex(
+                bin_dir,
+                f"""
+if [ "$1" = "login" ]; then
+  echo 'Logged in using ChatGPT'
+  exit 0
+fi
+printf '%s\\n' "$@" > "{args_path}"
+output=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    shift
+    output="$1"
+  fi
+  shift
+done
+printf 'Codex OK\\n' > "$output"
+""",
+            )
+            job = make_job(tmp)
+            job["provider"] = "codex"
+            job["codex_model"] = "gpt-5.3-codex"
+            JobStore(paths).add(job)
+
+            result = run_job(
+                job["id"],
+                paths=paths,
+                codex_bin=str(fake),
+                cleanup_launchd=False,
+            )
+
+            self.assertEqual(result.status, "success")
+            args = args_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(args[args.index("--model") + 1], "gpt-5.3-codex")
+
+    def test_claude_model_override_threads_into_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = make_paths(tmp)
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            args_path = Path(tmp) / "claude-args.txt"
+            fake = write_fake_claude(
+                bin_dir,
+                f"""
+printf '%s\\n' "$@" > "{args_path}"
+echo '{{"result":"ok"}}'
+""",
+            )
+            job = make_job(tmp)
+            job["claude_model"] = "haiku"
+            JobStore(paths).add(job)
+
+            result = run_job(
+                job["id"],
+                paths=paths,
+                claude_bin=str(fake),
+                cleanup_launchd=False,
+            )
+
+            self.assertEqual(result.status, "success")
+            args = args_path.read_text(encoding="utf-8").splitlines()
+            self.assertIn("--model", args)
+            self.assertEqual(args[args.index("--model") + 1], "haiku")
+
+    def test_claude_run_omits_model_flag_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = make_paths(tmp)
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            args_path = Path(tmp) / "claude-args.txt"
+            fake = write_fake_claude(
+                bin_dir,
+                f"""
+printf '%s\\n' "$@" > "{args_path}"
+echo '{{"result":"ok"}}'
+""",
+            )
+            job = make_job(tmp)
+            JobStore(paths).add(job)
+
+            run_job(
+                job["id"],
+                paths=paths,
+                claude_bin=str(fake),
+                cleanup_launchd=False,
+            )
+
+            args = args_path.read_text(encoding="utf-8").splitlines()
+            self.assertNotIn("--model", args)
 
     def test_successful_codex_run_records_rate_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

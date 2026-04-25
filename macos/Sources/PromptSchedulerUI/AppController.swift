@@ -239,6 +239,8 @@ struct SimpleScheduleDraft: Equatable {
     var kind: SimpleScheduleKind
     var time: String
     var weekday: SimpleScheduleWeekday
+    var claudeModel: String
+    var codexModel: String
 
     var daily: String? {
         kind == .daily ? time : nil
@@ -246,6 +248,16 @@ struct SimpleScheduleDraft: Equatable {
 
     var weekly: String? {
         kind == .weekly ? "\(weekday.rawValue) \(time)" : nil
+    }
+
+    var claudeModelOrNil: String? {
+        let trimmed = claudeModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var codexModelOrNil: String? {
+        let trimmed = codexModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
@@ -273,12 +285,17 @@ final class AppController: ObservableObject {
     @Published var lastManualSend: ManualSendStatus?
     @Published private var selectedSendProvider: String?
     @Published var wakeLoopPrompt: String
+    @Published var claudeModelDefault: String
+    @Published var codexModelDefault: String
 
     private let engine: EngineClient
     private static let sendProviderDefaultsKey = "PromptScheduler.SendProvider"
     private static let sendProviderChoices = ["codex", "claude", "both"]
     static let wakeLoopPromptDefaultsKey = "PromptScheduler.WakeLoopPrompt"
     static let defaultWakeLoopPrompt = "Reply with exactly OK."
+    static let claudeModelDefaultsKey = "PromptScheduler.ClaudeModel"
+    static let codexModelDefaultsKey = "PromptScheduler.CodexModel"
+    static let defaultCodexModel = "gpt-5.4-mini"
     private static let summaryDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .short
@@ -293,6 +310,18 @@ final class AppController: ObservableObject {
         )
         let storedPrompt = UserDefaults.standard.string(forKey: Self.wakeLoopPromptDefaultsKey)
         self.wakeLoopPrompt = (storedPrompt?.isEmpty == false ? storedPrompt! : Self.defaultWakeLoopPrompt)
+        self.claudeModelDefault = UserDefaults.standard.string(forKey: Self.claudeModelDefaultsKey) ?? ""
+        self.codexModelDefault = UserDefaults.standard.string(forKey: Self.codexModelDefaultsKey) ?? Self.defaultCodexModel
+    }
+
+    func setClaudeModelDefault(_ value: String) {
+        claudeModelDefault = value
+        UserDefaults.standard.set(value, forKey: Self.claudeModelDefaultsKey)
+    }
+
+    func setCodexModelDefault(_ value: String) {
+        codexModelDefault = value
+        UserDefaults.standard.set(value, forKey: Self.codexModelDefaultsKey)
     }
 
     var activeProvider: String? {
@@ -325,7 +354,7 @@ final class AppController: ObservableObject {
     }
 
     var sendProviderSelection: String {
-        selectedSendProvider ?? activeProvider ?? "claude"
+        selectedSendProvider ?? "both"
     }
 
     var sendProviderLabel: String {
@@ -571,7 +600,9 @@ final class AppController: ObservableObject {
                 prompt: prompt,
                 provider: draft.provider,
                 daily: draft.daily,
-                weekly: draft.weekly
+                weekly: draft.weekly,
+                claudeModel: draft.claudeModelOrNil,
+                codexModel: draft.codexModelOrNil
             )
             guard response.ok else {
                 return .failure(response.error ?? "Could not create the schedule.")

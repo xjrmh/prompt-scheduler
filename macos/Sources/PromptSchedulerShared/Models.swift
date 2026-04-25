@@ -165,6 +165,8 @@ public struct ScheduleJob: Codable, Equatable, Identifiable, Sendable {
     public var cwd: String?
     public var provider: String?
     public var providerLabel: String?
+    public var claudeModel: String?
+    public var codexModel: String?
     public var schedule: JSONValue?
     public var scheduleLabel: String?
     public var status: String?
@@ -178,6 +180,8 @@ public struct ScheduleJob: Codable, Equatable, Identifiable, Sendable {
     enum CodingKeys: String, CodingKey {
         case id, name, cwd, provider, schedule, status
         case providerLabel = "provider_label"
+        case claudeModel = "claude_model"
+        case codexModel = "codex_model"
         case scheduleLabel = "schedule_label"
         case lastStatus = "last_status"
         case lastRunAt = "last_run_at"

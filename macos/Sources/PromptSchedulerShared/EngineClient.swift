@@ -58,11 +58,17 @@ public final class EngineClient: Sendable {
         return try await runJSON(args, as: AppStatus.self)
     }
 
-    public func startNow(cwd: String, provider: String? = nil) async throws -> RunResponse {
+    public func startNow(
+        cwd: String,
+        provider: String? = nil,
+        claudeModel: String? = nil,
+        codexModel: String? = nil
+    ) async throws -> RunResponse {
         var args = ["start-now", "--cwd", cwd]
         if let provider, !provider.isEmpty {
             args.append(contentsOf: ["--provider", provider])
         }
+        Self.appendModelArgs(&args, claudeModel: claudeModel, codexModel: codexModel)
         args.append("--json")
         return try await runJSON(args, as: RunResponse.self)
     }
@@ -70,7 +76,9 @@ public final class EngineClient: Sendable {
     public func startAtReset(
         cwd: String,
         provider: String? = nil,
-        bufferMinutes: Int = 2
+        bufferMinutes: Int = 2,
+        claudeModel: String? = nil,
+        codexModel: String? = nil
     ) async throws -> ScheduleAddResponse {
         var args = [
             "start-at-reset",
@@ -80,6 +88,7 @@ public final class EngineClient: Sendable {
         if let provider, !provider.isEmpty {
             args.append(contentsOf: ["--provider", provider])
         }
+        Self.appendModelArgs(&args, claudeModel: claudeModel, codexModel: codexModel)
         args.append("--json")
         return try await runJSON(args, as: ScheduleAddResponse.self)
     }
@@ -88,7 +97,9 @@ public final class EngineClient: Sendable {
         cwd: String,
         provider: String?,
         every: String,
-        prompt: String
+        prompt: String,
+        claudeModel: String? = nil,
+        codexModel: String? = nil
     ) async throws -> ScheduleAddResponse {
         var args = [
             "wake-loop", "start",
@@ -99,6 +110,7 @@ public final class EngineClient: Sendable {
         if let provider, !provider.isEmpty {
             args.append(contentsOf: ["--provider", provider])
         }
+        Self.appendModelArgs(&args, claudeModel: claudeModel, codexModel: codexModel)
         args.append("--json")
         return try await runJSON(args, as: ScheduleAddResponse.self)
     }
@@ -113,7 +125,9 @@ public final class EngineClient: Sendable {
         prompt: String,
         provider: String? = nil,
         daily: String? = nil,
-        weekly: String? = nil
+        weekly: String? = nil,
+        claudeModel: String? = nil,
+        codexModel: String? = nil
     ) async throws -> ScheduleAddResponse {
         var args = ["add"]
         if let provider, !provider.isEmpty {
@@ -125,8 +139,22 @@ public final class EngineClient: Sendable {
         } else if let weekly, !weekly.isEmpty {
             args.append(contentsOf: ["--weekly", weekly])
         }
+        Self.appendModelArgs(&args, claudeModel: claudeModel, codexModel: codexModel)
         args.append(contentsOf: ["--prompt", prompt, "--json"])
         return try await runJSON(args, as: ScheduleAddResponse.self)
+    }
+
+    private static func appendModelArgs(
+        _ args: inout [String],
+        claudeModel: String?,
+        codexModel: String?
+    ) {
+        if let claudeModel, !claudeModel.isEmpty {
+            args.append(contentsOf: ["--claude-model", claudeModel])
+        }
+        if let codexModel, !codexModel.isEmpty {
+            args.append(contentsOf: ["--codex-model", codexModel])
+        }
     }
 
     public func removeSchedule(jobID: String) async throws -> ScheduleRemoveResponse {

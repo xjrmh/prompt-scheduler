@@ -299,6 +299,23 @@ def _codex_response_path(paths: AppPaths, job_id: str, timestamp: str) -> Path:
     return paths.logs_dir / f"{job_id}-{timestamp}.response.txt"
 
 
+DEFAULT_CODEX_MODEL = "gpt-5.4-mini"
+
+
+def _resolve_model(job: dict[str, Any], provider: str) -> str | None:
+    if provider == CLAUDE:
+        value = job.get("claude_model")
+    elif provider == CODEX:
+        value = job.get("codex_model")
+    else:
+        return None
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if trimmed:
+            return trimmed
+    return None
+
+
 def _build_prompt_command(
     provider: str,
     executable: str,
@@ -306,24 +323,30 @@ def _build_prompt_command(
     cwd: Path,
     prompt: str,
     response_path: Path | None,
+    model: str | None = None,
 ) -> list[str]:
     if provider == CLAUDE:
-        return [
-            executable,
-            "-p",
+        command = [executable, "-p"]
+        if model:
+            command.extend(["--model", model])
+        command.extend([
             "--max-turns",
             "1",
             "--no-session-persistence",
             "--output-format",
             "json",
             prompt,
-        ]
+        ])
+        return command
     if provider == CODEX:
+        codex_model = model or DEFAULT_CODEX_MODEL
         command = [
             executable,
             "--ask-for-approval",
             "never",
             "exec",
+            "--model",
+            codex_model,
             "--cd",
             str(cwd),
             "--skip-git-repo-check",
@@ -499,6 +522,7 @@ def _execute_job(
                 cwd=cwd,
                 prompt=job["prompt"],
                 response_path=response_path,
+                model=_resolve_model(job, provider),
             )
             try:
                 completed = subprocess.run(
@@ -919,6 +943,8 @@ def run_inline_prompt(
     provider_bin: str | None = None,
     claude_bin: str | None = None,
     codex_bin: str | None = None,
+    claude_model: str | None = None,
+    codex_model: str | None = None,
 ) -> RunResult:
     provider = normalize_provider_selection(provider, default=CLAUDE)
     paths = paths or AppPaths.from_env()
@@ -933,6 +959,10 @@ def run_inline_prompt(
         "created_at": utc_now_iso(),
         "run_count": 0,
     }
+    if claude_model:
+        job["claude_model"] = claude_model
+    if codex_model:
+        job["codex_model"] = codex_model
     return _execute_job(
         job,
         paths=paths,
