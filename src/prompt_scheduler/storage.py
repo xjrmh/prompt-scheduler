@@ -120,3 +120,11 @@ class StateStore:
             payload["reset_source"] = "claude-code-statusline"
 
         self.save(payload)
+
+    def record_codex_rate_limits(self, fields: dict[str, Any]) -> None:
+        payload = self.load()
+        updated_at = utc_now_iso()
+        payload.update(fields)
+        payload["codex_rate_limits_updated_at"] = updated_at
+        payload["updated_at"] = updated_at
+        self.save(payload)

@@ -118,6 +118,173 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["job"]["prompt"], "Reply with exactly OK.")
             self.assertEqual(payload["job"]["schedule"]["type"], "once")
 
+    def test_window_start_at_reset_codex_uses_codex_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = AppPaths(root / "state", root / "agents")
+            now = datetime.now().astimezone()
+            claude_reset = (now + timedelta(hours=4)).replace(microsecond=0)
+            codex_reset = (now + timedelta(hours=1)).replace(microsecond=0)
+            StateStore(paths).save(
+                {
+                    "next_reset_at": claude_reset.isoformat(),
+                    "codex_next_reset_at": codex_reset.isoformat(),
+                }
+            )
+            out = StringIO()
+            with patch.dict("os.environ", self._env(root)), redirect_stdout(out):
+                code = main(
+                    [
+                        "window",
+                        "start-at-reset",
+                        "--cwd",
+                        tmp,
+                        "--provider",
+                        "codex",
+                        "--dry-run",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            payload = json.loads(out.getvalue())
+            self.assertEqual(payload["job"]["provider"], "codex")
+            scheduled = datetime.fromisoformat(payload["job"]["schedule"]["run_at"])
+            expected = (codex_reset + timedelta(minutes=2)).astimezone(scheduled.tzinfo).replace(second=0, microsecond=0)
+            self.assertEqual(scheduled.replace(second=0, microsecond=0), expected)
+
+    def test_window_start_at_reset_codex_errors_when_codex_reset_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = AppPaths(root / "state", root / "agents")
+            claude_reset = (datetime.now().astimezone() + timedelta(hours=1)).isoformat()
+            StateStore(paths).save({"next_reset_at": claude_reset})
+            err = StringIO()
+            with patch.dict("os.environ", self._env(root)), redirect_stderr(err):
+                code = main(
+                    [
+                        "window",
+                        "start-at-reset",
+                        "--cwd",
+                        tmp,
+                        "--provider",
+                        "codex",
+                        "--dry-run",
+                    ]
+                )
+            self.assertNotEqual(code, 0)
+            self.assertIn("Codex", err.getvalue())
+
+    def test_window_start_at_reset_dedups_same_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = AppPaths(root / "state", root / "agents")
+            now = datetime.now().astimezone()
+            StateStore(paths).save(
+                {
+                    "next_reset_at": (now + timedelta(hours=4)).isoformat(),
+                    "codex_next_reset_at": (now + timedelta(hours=1)).isoformat(),
+                }
+            )
+
+            with patch.dict("os.environ", self._env(root)), patch(
+                "prompt_scheduler.cli.LaunchdManager"
+            ) as launchd_cls:
+                launchd_cls.return_value.install.return_value = type(
+                    "FakeInstall",
+                    (),
+                    {"label": "x", "plist_path": Path(tmp) / "p.plist", "plist": "<x/>", "loaded": True},
+                )()
+                launchd_cls.return_value.uninstall.return_value = None
+
+                first = StringIO()
+                with redirect_stdout(first):
+                    code1 = main(
+                        ["window", "start-at-reset", "--cwd", tmp, "--provider", "codex", "--json"]
+                    )
+                second = StringIO()
+                with redirect_stdout(second):
+                    code2 = main(
+                        ["window", "start-at-reset", "--cwd", tmp, "--provider", "codex", "--json"]
+                    )
+
+            self.assertEqual(code1, 0)
+            self.assertEqual(code2, 0)
+            jobs = JobStore(paths).list_jobs()
+            wake_jobs = [j for j in jobs if j.get("name") == "start-window-at-reset"]
+            self.assertEqual(len(wake_jobs), 1)
+            self.assertEqual(wake_jobs[0]["provider"], "codex")
+            self.assertEqual(wake_jobs[0]["id"], json.loads(second.getvalue())["job"]["id"])
+
+    def test_window_start_at_reset_does_not_dedup_other_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = AppPaths(root / "state", root / "agents")
+            now = datetime.now().astimezone()
+            StateStore(paths).save(
+                {
+                    "next_reset_at": (now + timedelta(hours=4)).isoformat(),
+                    "codex_next_reset_at": (now + timedelta(hours=1)).isoformat(),
+                }
+            )
+
+            with patch.dict("os.environ", self._env(root)), patch(
+                "prompt_scheduler.cli.LaunchdManager"
+            ) as launchd_cls:
+                launchd_cls.return_value.install.return_value = type(
+                    "FakeInstall",
+                    (),
+                    {"label": "x", "plist_path": Path(tmp) / "p.plist", "plist": "<x/>", "loaded": True},
+                )()
+                launchd_cls.return_value.uninstall.return_value = None
+
+                with redirect_stdout(StringIO()):
+                    self.assertEqual(
+                        main(["window", "start-at-reset", "--cwd", tmp, "--provider", "claude", "--json"]),
+                        0,
+                    )
+                    self.assertEqual(
+                        main(["window", "start-at-reset", "--cwd", tmp, "--provider", "codex", "--json"]),
+                        0,
+                    )
+
+            jobs = JobStore(paths).list_jobs()
+            wake_jobs = [j for j in jobs if j.get("name") == "start-window-at-reset"]
+            self.assertEqual(len(wake_jobs), 2)
+            providers = sorted(j["provider"] for j in wake_jobs)
+            self.assertEqual(providers, ["claude", "codex"])
+
+    def test_window_start_at_reset_both_uses_later_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = AppPaths(root / "state", root / "agents")
+            now = datetime.now().astimezone()
+            claude_reset = (now + timedelta(hours=4)).replace(microsecond=0)
+            codex_reset = (now + timedelta(hours=1)).replace(microsecond=0)
+            StateStore(paths).save(
+                {
+                    "next_reset_at": claude_reset.isoformat(),
+                    "codex_next_reset_at": codex_reset.isoformat(),
+                }
+            )
+            out = StringIO()
+            with patch.dict("os.environ", self._env(root)), redirect_stdout(out):
+                code = main(
+                    [
+                        "window",
+                        "start-at-reset",
+                        "--cwd",
+                        tmp,
+                        "--provider",
+                        "both",
+                        "--dry-run",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            payload = json.loads(out.getvalue())
+            self.assertEqual(payload["job"]["provider"], "both")
+            scheduled = datetime.fromisoformat(payload["job"]["schedule"]["run_at"])
+            expected = (claude_reset + timedelta(minutes=2)).astimezone(scheduled.tzinfo).replace(second=0, microsecond=0)
+            self.assertEqual(scheduled.replace(second=0, microsecond=0), expected)
+
     def test_statusline_records_rate_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -412,7 +579,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self._assert_interactive_add(
                 tmp,
-                ["", "daily-test", "daily", "09:00", "hello"],
+                ["", "daily-test", "daily", "09:00", "hello", ""],
                 {"type": "daily", "time": "09:00"},
             )
 
@@ -420,17 +587,18 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             payload = self._interactive_add_payload(
                 tmp,
-                ["", "weekly-test", "weekly", "Mon-Fri 09:00", "hello"],
+                ["", "weekly-test", "weekly", "Mon-Fri 09:00", "hello", "both"],
             )
             self.assertEqual(payload["job"]["schedule"]["type"], "weekly")
             self.assertEqual(payload["job"]["schedule"]["days"], [1, 2, 3, 4, 5])
+            self.assertEqual(payload["job"]["provider"], "both")
 
     def test_interactive_add_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_at = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M")
             payload = self._interactive_add_payload(
                 tmp,
-                ["", "once-test", "once", run_at, "hello"],
+                ["", "once-test", "once", run_at, "hello", ""],
             )
             self.assertEqual(payload["job"]["schedule"]["type"], "once")
 
@@ -708,6 +876,33 @@ class CliTests(unittest.TestCase):
             payload = json.loads(out.getvalue())
             self.assertEqual(payload["job"]["provider"], "codex")
             self.assertEqual(payload["job"]["provider_label"], "Codex")
+
+    def test_add_json_dry_run_accepts_both_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = StringIO()
+            with patch.dict("os.environ", self._env(Path(tmp))), redirect_stdout(out):
+                code = main(
+                    [
+                        "add",
+                        "--provider",
+                        "both",
+                        "--name",
+                        "both-json",
+                        "--cwd",
+                        tmp,
+                        "--daily",
+                        "09:00",
+                        "--prompt",
+                        "hello",
+                        "--dry-run",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out.getvalue())
+            self.assertEqual(payload["job"]["provider"], "both")
+            self.assertEqual(payload["job"]["provider_label"], "Codex + Claude Code")
 
     def test_remove_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -67,6 +67,49 @@ public final class EngineClient: Sendable {
         return try await runJSON(args, as: RunResponse.self)
     }
 
+    public func startAtReset(
+        cwd: String,
+        provider: String? = nil,
+        bufferMinutes: Int = 2
+    ) async throws -> ScheduleAddResponse {
+        var args = [
+            "start-at-reset",
+            "--cwd", cwd,
+            "--buffer-minutes", String(bufferMinutes)
+        ]
+        if let provider, !provider.isEmpty {
+            args.append(contentsOf: ["--provider", provider])
+        }
+        args.append("--json")
+        return try await runJSON(args, as: ScheduleAddResponse.self)
+    }
+
+    public func addSchedule(
+        name: String,
+        cwd: String,
+        prompt: String,
+        provider: String? = nil,
+        daily: String? = nil,
+        weekly: String? = nil
+    ) async throws -> ScheduleAddResponse {
+        var args = ["add"]
+        if let provider, !provider.isEmpty {
+            args.append(contentsOf: ["--provider", provider])
+        }
+        args.append(contentsOf: ["--name", name, "--cwd", cwd])
+        if let daily, !daily.isEmpty {
+            args.append(contentsOf: ["--daily", daily])
+        } else if let weekly, !weekly.isEmpty {
+            args.append(contentsOf: ["--weekly", weekly])
+        }
+        args.append(contentsOf: ["--prompt", prompt, "--json"])
+        return try await runJSON(args, as: ScheduleAddResponse.self)
+    }
+
+    public func removeSchedule(jobID: String) async throws -> ScheduleRemoveResponse {
+        return try await runJSON(["remove", jobID, "--json"], as: ScheduleRemoveResponse.self)
+    }
+
     public func logs(jobID: String? = nil) async throws -> LogsResponse {
         var args = ["logs", "--json"]
         if let jobID {

@@ -95,6 +95,9 @@ public struct ResetStatus: Codable, Equatable, Sendable {
     public var rateLimits: RateLimits?
     public var rateLimitsUpdatedAt: String?
     public var resetSource: String?
+    public var codexNextResetAt: String?
+    public var codexWeeklyResetAt: String?
+    public var codexRateLimitsUpdatedAt: String?
 
     enum CodingKeys: String, CodingKey {
         case nextResetAt = "next_reset_at"
@@ -103,6 +106,9 @@ public struct ResetStatus: Codable, Equatable, Sendable {
         case rateLimits = "rate_limits"
         case rateLimitsUpdatedAt = "rate_limits_updated_at"
         case resetSource = "reset_source"
+        case codexNextResetAt = "codex_next_reset_at"
+        case codexWeeklyResetAt = "codex_weekly_reset_at"
+        case codexRateLimitsUpdatedAt = "codex_rate_limits_updated_at"
     }
 }
 
@@ -188,6 +194,18 @@ public struct RunResponse: Codable, Equatable, Sendable {
     public var error: String?
 }
 
+public struct ScheduleAddResponse: Codable, Equatable, Sendable {
+    public var ok: Bool
+    public var job: ScheduleJob?
+    public var error: String?
+}
+
+public struct ScheduleRemoveResponse: Codable, Equatable, Sendable {
+    public var ok: Bool
+    public var removed: ScheduleJob?
+    public var error: String?
+}
+
 public struct RunResult: Codable, Equatable, Sendable {
     public var status: String
     public var exitCode: Int
@@ -198,6 +216,7 @@ public struct RunResult: Codable, Equatable, Sendable {
     public var message: String?
     public var responseSummary: String?
     public var claudeResponseSummary: String?
+    public var providerResults: [RunResult]?
 
     enum CodingKeys: String, CodingKey {
         case status, provider, reset, message
@@ -206,6 +225,7 @@ public struct RunResult: Codable, Equatable, Sendable {
         case providerLabel = "provider_label"
         case responseSummary = "response_summary"
         case claudeResponseSummary = "claude_response_summary"
+        case providerResults = "provider_results"
     }
 }
 

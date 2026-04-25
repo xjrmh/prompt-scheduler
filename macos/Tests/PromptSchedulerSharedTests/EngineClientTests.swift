@@ -150,6 +150,74 @@ final class EngineClientTests: XCTestCase {
         XCTAssertEqual(response.result?.responseSummary, "OK")
     }
 
+    func testBuildsStartAtResetCommandWithProvider() async throws {
+        let client = EngineClient(
+            commandResolver: {
+                EngineCommand(executable: "/usr/local/bin/prompt-scheduler")
+            },
+            runProcess: { command in
+                XCTAssertEqual(
+                    command.arguments,
+                    [
+                        "start-at-reset",
+                        "--cwd", "/tmp/project",
+                        "--buffer-minutes", "2",
+                        "--provider", "both",
+                        "--json"
+                    ]
+                )
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: #"{"ok":true,"job":{"id":"job-1234","name":"start-window-at-reset","cwd":"/tmp/project","provider":"both","provider_label":"Codex + Claude Code","schedule_label":"once at 2026-04-25 09:02","status":"scheduled"}}"#.data(using: .utf8)!
+                )
+            }
+        )
+
+        let response = try await client.startAtReset(cwd: "/tmp/project", provider: "both")
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.job?.provider, "both")
+        XCTAssertEqual(response.job?.scheduleLabel, "once at 2026-04-25 09:02")
+    }
+
+    func testBuildsAddScheduleCommand() async throws {
+        let client = EngineClient(
+            commandResolver: {
+                EngineCommand(executable: "/usr/local/bin/prompt-scheduler")
+            },
+            runProcess: { command in
+                XCTAssertEqual(
+                    command.arguments,
+                    [
+                        "add",
+                        "--provider", "both",
+                        "--name", "Morning",
+                        "--cwd", "/tmp/project",
+                        "--daily", "09:00",
+                        "--prompt", "hello",
+                        "--json"
+                    ]
+                )
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: #"{"ok":true,"job":{"id":"job-1234","name":"Morning","cwd":"/tmp/project","provider":"both","provider_label":"Codex + Claude Code","schedule_label":"daily at 09:00","status":"scheduled"}}"#.data(using: .utf8)!
+                )
+            }
+        )
+
+        let response = try await client.addSchedule(
+            name: "Morning",
+            cwd: "/tmp/project",
+            prompt: "hello",
+            provider: "both",
+            daily: "09:00"
+        )
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.job?.provider, "both")
+        XCTAssertEqual(response.job?.scheduleLabel, "daily at 09:00")
+    }
+
     func testDefaultCommandUsesEnvironmentOverride() {
         let client = EngineClient(
             commandResolver: {

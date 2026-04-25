@@ -10,7 +10,9 @@ ProviderName = str
 
 CLAUDE = "claude"
 CODEX = "codex"
+BOTH = "both"
 SUPPORTED_PROVIDERS = (CLAUDE, CODEX)
+SEND_PROVIDER_CHOICES = (CODEX, CLAUDE, BOTH)
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,32 @@ def normalize_provider(value: object, *, default: ProviderName = CLAUDE) -> Prov
     if default in PROVIDER_SPECS:
         return default
     return CLAUDE
+
+
+def normalize_provider_selection(
+    value: object, *, default: ProviderName = CLAUDE
+) -> ProviderName:
+    if isinstance(value, str):
+        provider = value.strip().lower()
+        if provider in SEND_PROVIDER_CHOICES:
+            return provider
+    if default in SEND_PROVIDER_CHOICES:
+        return default
+    return CLAUDE
+
+
+def expand_provider_selection(provider: object) -> tuple[ProviderName, ...]:
+    selection = normalize_provider_selection(provider)
+    if selection == BOTH:
+        return (CODEX, CLAUDE)
+    return (normalize_provider(selection),)
+
+
+def provider_label(provider: object, *, default: ProviderName = CLAUDE) -> str:
+    selection = normalize_provider_selection(provider, default=default)
+    if selection == BOTH:
+        return "Codex + Claude Code"
+    return provider_spec(selection, default=default).label
 
 
 def provider_spec(provider: object, *, default: ProviderName = CLAUDE) -> ProviderSpec:

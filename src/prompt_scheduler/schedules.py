@@ -150,7 +150,14 @@ def is_due(job: dict[str, Any], now: datetime | None = None) -> bool:
 
 
 def is_terminal_once_status(status: str | None) -> bool:
-    return status in {"completed", "failed", "usage_limit", "auth_required", "timed_out"}
+    return status in {
+        "completed",
+        "failed",
+        "partial_success",
+        "usage_limit",
+        "auth_required",
+        "timed_out",
+    }
 
 
 def format_schedule(schedule: dict[str, Any]) -> str:

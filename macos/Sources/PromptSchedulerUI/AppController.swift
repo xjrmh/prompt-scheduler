@@ -10,6 +10,11 @@ enum MenuBarIconState: Equatable {
 }
 
 struct ManualSendStatus: Equatable {
+    enum Kind: Equatable {
+        case send
+        case schedule
+    }
+
     enum Tone: Equatable {
         case pending
         case success
@@ -26,23 +31,55 @@ struct ManualSendStatus: Equatable {
     var exitCode: Int?
     var logPath: String?
     var responseText: String?
+    var provider: String?
+    var kind: Kind
 
-    static func sending(providerLabel: String, timestamp: Date = Date()) -> ManualSendStatus {
+    static func sending(providerLabel: String, provider: String, timestamp: Date = Date()) -> ManualSendStatus {
         ManualSendStatus(
             tone: .pending,
             title: "Sending prompt",
             detail: "Starting \(providerLabel) with the OK prompt.",
-            timestamp: timestamp
+            timestamp: timestamp,
+            provider: provider,
+            kind: .send
         )
     }
 
-    static func finished(response: RunResponse, timestamp: Date = Date()) -> ManualSendStatus {
+    static func scheduling(providerLabel: String, provider: String, timestamp: Date = Date()) -> ManualSendStatus {
+        ManualSendStatus(
+            tone: .pending,
+            title: "Scheduling send",
+            detail: "Scheduling \(providerLabel) for the next usage reset.",
+            timestamp: timestamp,
+            provider: provider,
+            kind: .schedule
+        )
+    }
+
+    static func scheduled(scheduleLabel: String, provider: String, timestamp: Date = Date()) -> ManualSendStatus {
+        ManualSendStatus(
+            tone: .success,
+            title: "Send scheduled",
+            detail: "Scheduled \(scheduleLabel).",
+            timestamp: timestamp,
+            provider: provider,
+            kind: .schedule
+        )
+    }
+
+    static func finished(
+        response: RunResponse,
+        provider fallbackProvider: String? = nil,
+        timestamp: Date = Date()
+    ) -> ManualSendStatus {
         guard let result = response.result else {
             return ManualSendStatus(
                 tone: response.ok ? .success : .failure,
                 title: response.ok ? "Send started" : "Send failed",
                 detail: response.error ?? "The CLI did not return run details.",
-                timestamp: timestamp
+                timestamp: timestamp,
+                provider: fallbackProvider,
+                kind: .send
             )
         }
 
@@ -57,26 +94,37 @@ struct ManualSendStatus: Equatable {
             rawStatus: result.status,
             exitCode: result.exitCode,
             logPath: result.logPath,
-            responseText: cleanMessage(result.responseSummary ?? result.claudeResponseSummary)
+            responseText: cleanMessage(result.responseSummary ?? result.claudeResponseSummary),
+            provider: result.provider ?? fallbackProvider,
+            kind: .send
         )
     }
 
-    static func failed(_ message: String, timestamp: Date = Date()) -> ManualSendStatus {
+    static func failed(
+        _ message: String,
+        timestamp: Date = Date(),
+        provider: String? = nil,
+        kind: Kind = .send
+    ) -> ManualSendStatus {
         ManualSendStatus(
             tone: .failure,
             title: "Send failed",
             detail: message,
-            timestamp: timestamp
+            timestamp: timestamp,
+            provider: provider,
+            kind: kind
         )
     }
 
-    static func loginRequired(providerLabel: String, timestamp: Date = Date()) -> ManualSendStatus {
+    static func loginRequired(providerLabel: String, provider: String, timestamp: Date = Date()) -> ManualSendStatus {
         ManualSendStatus(
             tone: .failure,
             title: "\(providerLabel) login required",
             detail: "Sign in with \(providerLabel) before sending prompts.",
             timestamp: timestamp,
-            rawStatus: "auth_required"
+            rawStatus: "auth_required",
+            provider: provider,
+            kind: .send
         )
     }
 
@@ -88,6 +136,12 @@ struct ManualSendStatus: Equatable {
         switch status {
         case "success":
             return (.success, "Send succeeded", "\(providerLabel) accepted the prompt.")
+        case "partial_success":
+            return (
+                .warning,
+                "Send partially succeeded",
+                "At least one selected provider accepted the prompt."
+            )
         case "auth_required":
             return (.failure, "\(providerLabel) login required", "Sign in with \(providerLabel) before sending prompts.")
         case "usage_limit":
@@ -116,17 +170,110 @@ struct ManualSendStatus: Equatable {
     }
 }
 
+enum SimpleScheduleKind: String, CaseIterable, Identifiable {
+    case daily
+    case weekly
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .daily:
+            "Daily"
+        case .weekly:
+            "Weekly"
+        }
+    }
+}
+
+enum SimpleScheduleWeekday: String, CaseIterable, Identifiable {
+    case mon = "Mon"
+    case tue = "Tue"
+    case wed = "Wed"
+    case thu = "Thu"
+    case fri = "Fri"
+    case sat = "Sat"
+    case sun = "Sun"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .mon:
+            "Monday"
+        case .tue:
+            "Tuesday"
+        case .wed:
+            "Wednesday"
+        case .thu:
+            "Thursday"
+        case .fri:
+            "Friday"
+        case .sat:
+            "Saturday"
+        case .sun:
+            "Sunday"
+        }
+    }
+}
+
+struct SimpleScheduleDraft: Equatable {
+    var name: String
+    var cwd: String
+    var prompt: String
+    var provider: String
+    var kind: SimpleScheduleKind
+    var time: String
+    var weekday: SimpleScheduleWeekday
+
+    var daily: String? {
+        kind == .daily ? time : nil
+    }
+
+    var weekly: String? {
+        kind == .weekly ? "\(weekday.rawValue) \(time)" : nil
+    }
+}
+
+enum SimpleScheduleSaveResult: Equatable {
+    case success(String)
+    case failure(String)
+}
+
+struct ProviderRunSummary: Equatable, Identifiable {
+    var id: String { provider }
+
+    var provider: String
+    var title: String
+    var status: String
+    var nextUsageStart: String
+    var lastSentTime: String
+    var lastSentStatus: String
+}
+
 @MainActor
 final class AppController: ObservableObject {
     @Published var status: AppStatus?
     @Published var isLoading = false
     @Published var message: String?
     @Published var lastManualSend: ManualSendStatus?
+    @Published private var selectedSendProvider: String?
 
     private let engine: EngineClient
+    private static let sendProviderDefaultsKey = "PromptScheduler.SendProvider"
+    private static let sendProviderChoices = ["codex", "claude", "both"]
+    private static let summaryDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }()
 
     init(engine: EngineClient = EngineClient()) {
         self.engine = engine
+        self.selectedSendProvider = Self.validSendProvider(
+            UserDefaults.standard.string(forKey: Self.sendProviderDefaultsKey)
+        )
     }
 
     var activeProvider: String? {
@@ -158,43 +305,63 @@ final class AppController: ObservableObject {
             ?? (activeProvider == "codex" ? "Codex" : "Claude Code")
     }
 
+    var sendProviderSelection: String {
+        selectedSendProvider ?? activeProvider ?? "claude"
+    }
+
+    var sendProviderLabel: String {
+        label(for: sendProviderSelection)
+    }
+
     var loginCommand: String {
-        activeProviderStatus?.loginCommand
-            ?? (activeProvider == "codex" ? "codex login" : "claude auth login")
+        loginCommands.joined(separator: " && ")
+    }
+
+    var shouldShowLoginCommand: Bool {
+        !loginCommands.isEmpty
+    }
+
+    var installProvider: String? {
+        providerKeys(for: sendProviderSelection).first { provider in
+            providerStatus(for: provider)?.available != true
+        }
+    }
+
+    var installProviderLabel: String? {
+        installProvider.map { label(for: $0) }
     }
 
     var isReady: Bool {
-        activeProviderStatus?.available == true && activeProviderStatus?.authenticated == true
+        let providers = providerKeys(for: sendProviderSelection)
+        let entries = sendProviderStatusEntries
+        return entries.count == providers.count && entries.allSatisfy { _, providerStatus in
+            providerStatus.available == true && providerStatus.authenticated == true
+        }
     }
 
-    var readinessText: String {
-        guard status != nil else {
-            return "Checking setup"
+    var providerSummaries: [ProviderRunSummary] {
+        providerDisplayOrder.map { providerSummary(for: $0) }
+    }
+
+    var canStartAtNextUsageWindow: Bool {
+        guard isReady else {
+            return false
         }
-        let label = activeProviderLabel
-        guard let providerStatus = activeProviderStatus else {
-            return "No prompt provider configured"
+        return providerKeys(for: sendProviderSelection).allSatisfy { provider in
+            nextUsageStartDate(for: provider) != nil
         }
-        if providerStatus.available != true {
-            return "\(label) not installed"
-        }
-        if providerStatus.authenticated == true {
-            return "\(label): signed in"
-        }
-        if providerStatus.authenticated == false {
-            return "\(label) login required"
-        }
-        return "\(label) login unknown"
     }
 
     var providerStatusLines: [String] {
         guard status != nil else {
-            return []
+            return providerDisplayOrder.map { "\(shortLabel(for: $0)): checking" }
         }
 
-        return providerStatusEntries.map { provider, providerStatus in
-            let suffix = provider == activeProvider ? " (active)" : ""
-            return "\(providerStatus.label ?? label(for: provider)): \(shortStatus(providerStatus))\(suffix)"
+        return providerDisplayOrder.map { provider in
+            guard let providerStatus = providerStatus(for: provider) else {
+                return "\(shortLabel(for: provider)): unavailable"
+            }
+            return "\(shortLabel(for: provider)): \(shortStatus(providerStatus))"
         }
     }
 
@@ -211,7 +378,7 @@ final class AppController: ObservableObject {
             return .running
         }
 
-        if activeProviderStatus?.available != true || activeProviderStatus?.authenticated != true {
+        if !isReady {
             return .warning
         }
 
@@ -229,15 +396,15 @@ final class AppController: ObservableObject {
     var menuBarIconAccessibilityLabel: String {
         switch menuBarIconState {
         case .idle:
-            "\(activeProviderLabel) status idle"
+            "\(sendProviderLabel) status idle"
         case .running:
-            "\(activeProviderLabel) status running"
+            "\(sendProviderLabel) status running"
         case .success:
-            "\(activeProviderLabel) status last run succeeded"
+            "\(sendProviderLabel) status last run succeeded"
         case .warning:
-            "\(activeProviderLabel) status needs attention"
+            "\(sendProviderLabel) status needs attention"
         case .failure:
-            "\(activeProviderLabel) status last run failed"
+            "\(sendProviderLabel) status last run failed"
         }
     }
 
@@ -247,31 +414,55 @@ final class AppController: ObservableObject {
         }
     }
 
+    var scheduledJobs: [ScheduleJob] {
+        (status?.jobs ?? [])
+            .filter { ($0.status ?? "") == "scheduled" }
+            .sorted {
+                ($0.scheduleLabel ?? "") < ($1.scheduleLabel ?? "")
+            }
+    }
+
+    func removeSchedule(_ jobID: String) async {
+        await runTask {
+            let response = try await engine.removeSchedule(jobID: jobID)
+            if !response.ok {
+                message = response.error ?? "Could not cancel the scheduled job."
+                return
+            }
+            message = "Cancelled scheduled job."
+            status = try await engine.status()
+        }
+    }
+
     func installActiveProvider() async {
         await runTask {
-            status = try await engine.setup(install: true, provider: activeProvider)
-            message = isReady ? "\(activeProviderLabel) is ready." : "\(activeProviderLabel) setup is incomplete."
+            let provider = installProvider ?? activeProvider ?? "claude"
+            status = try await engine.setup(install: true, provider: provider)
+            message = isReady
+                ? "\(sendProviderLabel) is ready."
+                : "\(label(for: provider)) setup is incomplete."
         }
     }
 
     func startNow(cwd: String? = nil) async {
-        if activeProviderStatus?.available == true && activeProviderStatus?.authenticated == false {
-            let sendStatus = ManualSendStatus.loginRequired(providerLabel: activeProviderLabel)
+        if !isReady {
+            let detail = sendProviderReadinessIssue ?? "\(sendProviderLabel) is not ready."
+            let sendStatus = ManualSendStatus.failed(detail, provider: sendProviderSelection)
             lastManualSend = sendStatus
             message = sendStatus.title
             return
         }
-        let provider = activeProvider
-        lastManualSend = .sending(providerLabel: activeProviderLabel)
-        await runTask(onError: { [weak self] error in
-            let status = ManualSendStatus.failed(error.localizedDescription)
+        let provider = sendProviderSelection
+        lastManualSend = .sending(providerLabel: sendProviderLabel, provider: provider)
+        await runTask(onError: { [weak self, provider] error in
+            let status = ManualSendStatus.failed(error.localizedDescription, provider: provider)
             self?.lastManualSend = status
             self?.message = status.title
         }) {
             let targetFolder = cwd ?? defaultFolder
             try ensureDefaultFolderIfNeeded(targetFolder)
             let response = try await engine.startNow(cwd: targetFolder, provider: provider)
-            let sendStatus = ManualSendStatus.finished(response: response)
+            let sendStatus = ManualSendStatus.finished(response: response, provider: provider)
             lastManualSend = sendStatus
             message = sendStatus.title
             do {
@@ -279,6 +470,116 @@ final class AppController: ObservableObject {
             } catch {
                 message = "\(sendStatus.title). Could not refresh status: \(error.localizedDescription)"
             }
+        }
+    }
+
+    func startAtNextUsageWindow(cwd: String? = nil) async {
+        if !isReady {
+            let detail = sendProviderReadinessIssue ?? "\(sendProviderLabel) is not ready."
+            let sendStatus = ManualSendStatus.failed(
+                detail,
+                provider: sendProviderSelection,
+                kind: .schedule
+            )
+            lastManualSend = sendStatus
+            message = sendStatus.title
+            return
+        }
+        let provider = sendProviderSelection
+        lastManualSend = .scheduling(providerLabel: sendProviderLabel, provider: provider)
+        await runTask(onError: { [weak self, provider] error in
+            let status = ManualSendStatus.failed(
+                error.localizedDescription,
+                provider: provider,
+                kind: .schedule
+            )
+            self?.lastManualSend = status
+            self?.message = status.title
+        }) {
+            guard canStartAtNextUsageWindow else {
+                let status = ManualSendStatus.failed(
+                    "No next usage reset is available for \(sendProviderLabel).",
+                    provider: provider,
+                    kind: .schedule
+                )
+                lastManualSend = status
+                message = status.title
+                return
+            }
+            let targetFolder = cwd ?? defaultFolder
+            try ensureDefaultFolderIfNeeded(targetFolder)
+            let response = try await engine.startAtReset(cwd: targetFolder, provider: provider)
+            guard response.ok else {
+                let status = ManualSendStatus.failed(
+                    response.error ?? "Could not schedule the next usage reset send.",
+                    provider: provider,
+                    kind: .schedule
+                )
+                lastManualSend = status
+                message = status.title
+                return
+            }
+            let scheduleLabel = response.job?.scheduleLabel ?? "next usage reset"
+            let sendStatus = ManualSendStatus.scheduled(scheduleLabel: scheduleLabel, provider: provider)
+            lastManualSend = sendStatus
+            message = sendStatus.title
+            do {
+                status = try await engine.status()
+            } catch {
+                message = "\(sendStatus.title). Could not refresh status: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func setSendProviderSelection(_ provider: String) {
+        guard let value = Self.validSendProvider(provider) else {
+            return
+        }
+        selectedSendProvider = value
+        UserDefaults.standard.set(value, forKey: Self.sendProviderDefaultsKey)
+    }
+
+    func createSimpleSchedule(_ draft: SimpleScheduleDraft) async -> SimpleScheduleSaveResult {
+        let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cwd = draft.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = draft.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            return .failure("Name is required.")
+        }
+        guard !cwd.isEmpty else {
+            return .failure("Project folder is required.")
+        }
+        guard !prompt.isEmpty else {
+            return .failure("Message is required.")
+        }
+
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            try ensureDefaultFolderIfNeeded(cwd)
+            let response = try await engine.addSchedule(
+                name: name,
+                cwd: cwd,
+                prompt: prompt,
+                provider: draft.provider,
+                daily: draft.daily,
+                weekly: draft.weekly
+            )
+            guard response.ok else {
+                return .failure(response.error ?? "Could not create the schedule.")
+            }
+            let scheduleLabel = response.job?.scheduleLabel ?? draft.time
+            message = "Scheduled \(scheduleLabel)."
+            do {
+                status = try await engine.status()
+            } catch {
+                message = "Scheduled \(scheduleLabel). Could not refresh status: \(error.localizedDescription)"
+            }
+            return .success("Scheduled \(scheduleLabel).")
+        } catch {
+            message = error.localizedDescription
+            return .failure(error.localizedDescription)
         }
     }
 
@@ -313,29 +614,209 @@ final class AppController: ObservableObject {
         }
     }
 
-    private var providerStatusEntries: [(String, ProviderStatus)] {
-        let orderedProviders = ["codex", "claude"]
-        if let providers = status?.providers {
-            return orderedProviders.compactMap { provider in
-                guard let status = providers[provider] else {
-                    return nil
-                }
-                return (provider, status)
-            }
+    private var providerDisplayOrder: [String] {
+        ["claude", "codex"]
+    }
+
+    private func providerSummary(for provider: String) -> ProviderRunSummary {
+        let statusText: String
+        if status == nil {
+            statusText = "checking"
+        } else if let providerStatus = providerStatus(for: provider) {
+            statusText = shortStatus(providerStatus)
+        } else {
+            statusText = "unavailable"
         }
 
-        var entries: [(String, ProviderStatus)] = []
-        if let codex = status?.codex {
-            entries.append(("codex", codex))
+        let lastSent = latestSentState(for: provider)
+        return ProviderRunSummary(
+            provider: provider,
+            title: shortLabel(for: provider),
+            status: statusText,
+            nextUsageStart: nextUsageStartText(for: provider),
+            lastSentTime: lastSent?.time ?? "Never",
+            lastSentStatus: lastSent?.status ?? "Never"
+        )
+    }
+
+    private func nextUsageStartText(for provider: String) -> String {
+        guard let date = nextUsageStartDate(for: provider) else {
+            return "Unknown"
         }
-        if let claude = status?.claude {
-            entries.append(("claude", claude))
+        return Self.summaryDateFormatter.string(from: date)
+    }
+
+    private func nextUsageStartDate(for provider: String) -> Date? {
+        switch provider {
+        case "claude":
+            return Self.parseISODate(status?.reset.nextResetAt)
+        case "codex":
+            return Self.parseISODate(status?.reset.codexNextResetAt)
+        default:
+            return nil
         }
-        return entries
+    }
+
+    private func latestSentState(for provider: String) -> (time: String, status: String)? {
+        let manual = latestManualSendState(for: provider)
+        let job = latestJobState(for: provider)
+
+        if let manual, let job {
+            return manual.date >= job.date ? (manual.time, manual.status) : (job.time, job.status)
+        }
+        if let manual {
+            return (manual.time, manual.status)
+        }
+        if let job {
+            return (job.time, job.status)
+        }
+        return nil
+    }
+
+    private func latestManualSendState(for provider: String) -> (date: Date, time: String, status: String)? {
+        guard let send = lastManualSend,
+              send.kind == .send,
+              providerSelection(send.provider, includes: provider) else {
+            return nil
+        }
+        return (
+            send.timestamp,
+            Self.summaryDateFormatter.string(from: send.timestamp),
+            send.title
+        )
+    }
+
+    private func latestJobState(for provider: String) -> (date: Date, time: String, status: String)? {
+        guard let job = (status?.jobs ?? [])
+            .filter({
+                providerSelection($0.provider, includes: provider)
+                    && ($0.lastRunAt != nil || $0.lastStatus != nil)
+            })
+            .sorted(by: { (left, right) in
+                (Self.parseISODate(left.lastRunAt) ?? .distantPast)
+                    > (Self.parseISODate(right.lastRunAt) ?? .distantPast)
+            })
+            .first else {
+            return nil
+        }
+
+        let date = Self.parseISODate(job.lastRunAt) ?? .distantPast
+        return (
+            date,
+            Self.displayTimestamp(job.lastRunAt) ?? "Unknown",
+            job.lastStatus ?? job.status ?? "Unknown"
+        )
+    }
+
+    private var sendProviderStatusEntries: [(String, ProviderStatus)] {
+        providerKeys(for: sendProviderSelection).compactMap { provider in
+            guard let status = providerStatus(for: provider) else {
+                return nil
+            }
+            return (provider, status)
+        }
+    }
+
+    private var sendProviderReadinessIssue: String? {
+        for provider in providerKeys(for: sendProviderSelection) {
+            guard let status = providerStatus(for: provider) else {
+                return "\(label(for: provider)) status unknown"
+            }
+            if status.available != true {
+                return "\(label(for: provider)) not installed"
+            }
+            if status.authenticated == false {
+                return "\(label(for: provider)) login required"
+            }
+            if status.authenticated != true {
+                return "\(label(for: provider)) login unknown"
+            }
+        }
+        return nil
+    }
+
+    private var loginCommands: [String] {
+        providerKeys(for: sendProviderSelection).compactMap { provider in
+            guard providerStatus(for: provider)?.authenticated == false else {
+                return nil
+            }
+            return providerStatus(for: provider)?.loginCommand ?? loginCommand(for: provider)
+        }
     }
 
     private func label(for provider: String) -> String {
-        provider == "codex" ? "Codex" : "Claude Code"
+        if provider == "both" {
+            return "Codex + Claude Code"
+        }
+        return provider == "codex" ? "Codex" : "Claude Code"
+    }
+
+    private func shortLabel(for provider: String) -> String {
+        provider == "codex" ? "Codex" : "Claude"
+    }
+
+    private func providerKeys(for selection: String) -> [String] {
+        selection == "both" ? ["codex", "claude"] : [selection]
+    }
+
+    private func providerSelection(_ selection: String?, includes provider: String) -> Bool {
+        guard let selection else {
+            return false
+        }
+        return selection == "both" || selection == provider
+    }
+
+    private func providerStatus(for provider: String) -> ProviderStatus? {
+        if let status = status?.providers?[provider] {
+            return status
+        }
+        if provider == "codex" {
+            return status?.codex
+        }
+        if provider == "claude" {
+            return status?.claude
+        }
+        return nil
+    }
+
+    private func loginCommand(for provider: String) -> String {
+        provider == "codex" ? "codex login" : "claude auth login"
+    }
+
+    private static func validSendProvider(_ provider: String?) -> String? {
+        guard let provider = provider?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              sendProviderChoices.contains(provider) else {
+            return nil
+        }
+        return provider
+    }
+
+    private static func displayTimestamp(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        guard let date = parseISODate(value) else {
+            return value
+        }
+        return summaryDateFormatter.string(from: date)
+    }
+
+    private static func parseISODate(_ value: String?) -> Date? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+
+        let fractionalFormatter = ISO8601DateFormatter()
+        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractionalFormatter.date(from: value) {
+            return date
+        }
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
     }
 
     private func shortStatus(_ status: ProviderStatus) -> String {
@@ -343,7 +824,7 @@ final class AppController: ObservableObject {
             return "not installed"
         }
         if status.authenticated == true {
-            return "signed in"
+            return "ready"
         }
         if status.authenticated == false {
             return "login required"
@@ -380,6 +861,9 @@ final class AppController: ObservableObject {
         let normalized = status.lowercased()
         if normalized.contains("running") || normalized.contains("in_progress") {
             return .running
+        }
+        if normalized.contains("partial") {
+            return .warning
         }
         if normalized.contains("success") || normalized.contains("ok") || normalized.contains("complete") {
             return .success

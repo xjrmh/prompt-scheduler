@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from . import codex_rate_limits
 from .auth import AuthCheck, ClaudeAuthCheck, check_provider_auth
 from .ids import make_job_id
 from .installer import (
@@ -19,13 +20,17 @@ from .installer import (
 from .launchd import LaunchdError, LaunchdManager
 from .paths import AppPaths
 from .providers import (
+    BOTH,
     CLAUDE,
     CODEX,
     PROVIDER_SPECS,
+    SEND_PROVIDER_CHOICES,
     SUPPORTED_PROVIDERS,
     find_provider_executable,
     login_command_text,
     normalize_provider,
+    normalize_provider_selection,
+    provider_label,
     provider_spec,
 )
 from .runner import (
@@ -63,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_json_flag(doctor)
 
     top_add = subparsers.add_parser("add", help="Add a scheduled prompt.")
-    _add_provider_arg(top_add)
+    _add_provider_arg(top_add, include_both=True)
     _add_schedule_args(top_add, required=False)
     _add_json_flag(top_add)
 
@@ -99,14 +104,14 @@ def build_parser() -> argparse.ArgumentParser:
     start_now = subparsers.add_parser(
         "start-now", help="Start a provider session by sending a tiny OK prompt."
     )
-    _add_provider_arg(start_now, include_auto=True)
+    _add_provider_arg(start_now, include_auto=True, include_both=True)
     start_now.add_argument("--cwd", default=None)
     _add_json_flag(start_now)
 
     start_reset = subparsers.add_parser(
         "start-at-reset", help="Schedule the minimal prompt at the observed reset time."
     )
-    _add_provider_arg(start_reset)
+    _add_provider_arg(start_reset, include_both=True)
     start_reset.add_argument("--cwd", default=None)
     start_reset.add_argument("--buffer-minutes", type=int, default=2)
     start_reset.add_argument("--dry-run", action="store_true")
@@ -115,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     schedule = subparsers.add_parser("schedule", help="Manage scheduled jobs.")
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
     add = schedule_sub.add_parser("add", help="Add a scheduled prompt.")
-    _add_provider_arg(add)
+    _add_provider_arg(add, include_both=True)
     _add_schedule_args(add, required=True)
     _add_json_flag(add)
 
@@ -133,13 +138,13 @@ def build_parser() -> argparse.ArgumentParser:
     start_now = window_sub.add_parser(
         "start-now", help="Start a provider session by sending a tiny OK prompt."
     )
-    _add_provider_arg(start_now, include_auto=True)
+    _add_provider_arg(start_now, include_auto=True, include_both=True)
     start_now.add_argument("--cwd", required=True)
     _add_json_flag(start_now)
     start_reset = window_sub.add_parser(
         "start-at-reset", help="Schedule the minimal prompt at the observed reset time."
     )
-    _add_provider_arg(start_reset)
+    _add_provider_arg(start_reset, include_both=True)
     start_reset.add_argument("--cwd", required=True)
     start_reset.add_argument("--buffer-minutes", type=int, default=2)
     start_reset.add_argument("--dry-run", action="store_true")
@@ -166,8 +171,14 @@ def _add_install_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_provider_arg(parser: argparse.ArgumentParser, *, include_auto: bool = False) -> None:
-    choices = ("auto",) + SUPPORTED_PROVIDERS if include_auto else SUPPORTED_PROVIDERS
+def _add_provider_arg(
+    parser: argparse.ArgumentParser,
+    *,
+    include_auto: bool = False,
+    include_both: bool = False,
+) -> None:
+    provider_choices = SEND_PROVIDER_CHOICES if include_both else SUPPORTED_PROVIDERS
+    choices = ("auto",) + provider_choices if include_auto else provider_choices
     parser.add_argument(
         "--provider",
         choices=choices,
@@ -460,17 +471,21 @@ def _short_time(value: Any) -> str | None:
         return None
 
 
-def _provider_from_env() -> str | None:
+def _provider_from_env(*, include_both: bool = False) -> str | None:
     value = os.environ.get(PROVIDER_ENV_VAR)
-    if value and value.strip().lower() in PROVIDER_SPECS:
-        return value.strip().lower()
+    if not value:
+        return None
+    provider = value.strip().lower()
+    choices = SEND_PROVIDER_CHOICES if include_both else SUPPORTED_PROVIDERS
+    if provider in choices:
+        return provider
     return None
 
 
 def _provider_for_new_job(requested: str | None) -> str:
     if requested:
-        return normalize_provider(requested, default=CLAUDE)
-    return _provider_from_env() or CLAUDE
+        return normalize_provider_selection(requested, default=CLAUDE)
+    return _provider_from_env(include_both=True) or CLAUDE
 
 
 def _provider_executables() -> dict[str, str | None]:
@@ -541,7 +556,10 @@ def _resolve_run_provider(
     provider_selection: str | None = "auto",
 ) -> str:
     if provider_selection and provider_selection != "auto":
-        return normalize_provider(provider_selection, default=CLAUDE)
+        return normalize_provider_selection(provider_selection, default=CLAUDE)
+    env_provider = _provider_from_env(include_both=True)
+    if env_provider == BOTH:
+        return BOTH
     payload = _status_payload(paths, provider_selection=provider_selection)
     return normalize_provider(payload.get("active_provider"), default=CLAUDE)
 
@@ -888,6 +906,36 @@ def _status_checks_ok(payload: dict[str, Any]) -> bool:
     )
 
 
+def _reset_for_provider(state: dict[str, Any], provider: str) -> str | None:
+    if provider == CLAUDE:
+        return state.get("next_reset_at")
+    if provider == CODEX:
+        return state.get("codex_next_reset_at")
+    if provider == BOTH:
+        claude_at = state.get("next_reset_at")
+        codex_at = state.get("codex_next_reset_at")
+        if claude_at and codex_at:
+            try:
+                later = max(
+                    datetime.fromisoformat(claude_at),
+                    datetime.fromisoformat(codex_at),
+                )
+            except ValueError:
+                return claude_at
+            return later.isoformat()
+        return claude_at or codex_at
+    return None
+
+
+def _refresh_codex_rate_limits_into_state(paths: AppPaths) -> None:
+    rate_limits = codex_rate_limits.latest_rate_limits()
+    if rate_limits is None:
+        return
+    StateStore(paths).record_codex_rate_limits(
+        codex_rate_limits.to_state_payload(rate_limits)
+    )
+
+
 def _status_payload(
     paths: AppPaths,
     *,
@@ -909,6 +957,7 @@ def _status_payload(
     }
     active_provider = _choose_active_provider(providers, requested=provider_selection)
     jobs = [_job_payload(job) for job in JobStore(paths).list_jobs()]
+    _refresh_codex_rate_limits_into_state(paths)
     state = StateStore(paths).load()
     launch_agents_ok = paths.launch_agents_dir.exists() or paths.launch_agents_dir.parent.exists()
     ok = bool(
@@ -933,6 +982,10 @@ def _status_payload(
             "rate_limits": state.get("rate_limits"),
             "rate_limits_updated_at": state.get("rate_limits_updated_at"),
             "reset_source": state.get("reset_source"),
+            "codex_next_reset_at": state.get("codex_next_reset_at"),
+            "codex_weekly_reset_at": state.get("codex_weekly_reset_at"),
+            "codex_rate_limits": state.get("codex_rate_limits"),
+            "codex_rate_limits_updated_at": state.get("codex_rate_limits_updated_at"),
         },
         "jobs": jobs,
         "paths": {
@@ -952,11 +1005,11 @@ def _status_payload(
 
 def _job_payload(job: dict[str, Any]) -> dict[str, Any]:
     schedule = job.get("schedule", {})
-    provider = normalize_provider(job.get("provider"), default=CLAUDE)
+    provider = normalize_provider_selection(job.get("provider"), default=CLAUDE)
     response_summary = job.get("last_response_summary") or job.get(
         "last_claude_response_summary"
     )
-    if not response_summary:
+    if not response_summary and provider != BOTH:
         response_summary = extract_response_summary(
             job.get("last_stdout_summary") or "",
             provider=provider,
@@ -966,7 +1019,7 @@ def _job_payload(job: dict[str, Any]) -> dict[str, Any]:
         "name": job.get("name"),
         "cwd": job.get("cwd"),
         "provider": provider,
-        "provider_label": provider_spec(provider).label,
+        "provider_label": provider_label(provider),
         "schedule": schedule,
         "schedule_label": format_schedule(schedule),
         "status": job.get("status"),
@@ -1000,7 +1053,7 @@ def _build_job(
     cwd_path = Path(cwd).expanduser()
     if not cwd_path.is_dir():
         raise ValueError(f"cwd does not exist or is not a directory: {cwd_path}")
-    provider = normalize_provider(provider, default=CLAUDE)
+    provider = normalize_provider_selection(provider, default=CLAUDE)
     return {
         "id": make_job_id(name),
         "name": name,
@@ -1019,7 +1072,11 @@ def schedule_add(
     args: argparse.Namespace, paths: AppPaths, *, interactive: bool = False
 ) -> int:
     name, cwd, prompt, schedule = _resolve_add_inputs(args, interactive=interactive)
-    provider = _provider_for_new_job(getattr(args, "provider", None))
+    requested_provider = getattr(args, "provider", None)
+    if interactive and not requested_provider and sys.stdin.isatty():
+        provider = _prompt_for_provider(_provider_for_new_job(None))
+    else:
+        provider = _provider_for_new_job(requested_provider)
     job = _build_job(name, cwd, prompt, schedule, provider=provider)
     manager = LaunchdManager(paths)
     result = manager.install(job, dry_run=args.dry_run)
@@ -1146,6 +1203,17 @@ def _prompt_for_schedule() -> tuple[str | None, str | None, str | None]:
         print("Choose daily, weekly, or once.")
 
 
+def _prompt_for_provider(default: str) -> str:
+    default = normalize_provider_selection(default, default=CLAUDE)
+    while True:
+        value = input(f"Provider [codex/claude/both] ({default}): ").strip().lower()
+        if not value:
+            return default
+        if value in SEND_PROVIDER_CHOICES:
+            return value
+        print("Choose codex, claude, or both.")
+
+
 def schedule_list(paths: AppPaths, *, json_output: bool = False) -> int:
     jobs = JobStore(paths).list_jobs()
     if json_output:
@@ -1267,27 +1335,39 @@ def _auth_from_payload(payload: dict[str, Any]) -> ClaudeAuthCheck:
 
 
 def _run_result_payload(result: Any) -> dict[str, Any]:
+    detail = _run_result_detail_payload(result)
     return {
         "ok": result.exit_code == 0,
-        "result": {
-            "status": result.status,
-            "exit_code": result.exit_code,
-            "log_path": str(result.log_path),
-            "provider": result.provider,
-            "provider_label": provider_spec(result.provider).label,
-            "reset": result.reset_info,
-            "message": result.message,
-            "response_summary": result.claude_response_summary,
-            "claude_response_summary": result.claude_response_summary,
-        },
+        "result": detail,
+    }
+
+
+def _run_result_detail_payload(result: Any) -> dict[str, Any]:
+    return {
+        "status": result.status,
+        "exit_code": result.exit_code,
+        "log_path": str(result.log_path),
+        "provider": result.provider,
+        "provider_label": provider_label(result.provider),
+        "reset": result.reset_info,
+        "message": result.message,
+        "response_summary": result.claude_response_summary,
+        "claude_response_summary": result.claude_response_summary,
+        "provider_results": [
+            _run_result_detail_payload(provider_result)
+            for provider_result in (result.provider_results or ())
+        ],
     }
 
 
 def window_start_at_reset(args: argparse.Namespace, paths: AppPaths) -> int:
+    provider = _provider_for_new_job(getattr(args, "provider", None))
     state = StateStore(paths).load()
-    reset_at = state.get("next_reset_at")
+    reset_at = _reset_for_provider(state, provider)
     if not reset_at:
-        raise ValueError("no observed Claude reset time is stored")
+        raise ValueError(
+            f"no observed {provider_label(provider)} reset time is stored"
+        )
     target = (
         datetime.fromisoformat(reset_at) + timedelta(minutes=args.buffer_minutes)
     ).astimezone()
@@ -1298,7 +1378,7 @@ def window_start_at_reset(args: argparse.Namespace, paths: AppPaths) -> int:
         args.cwd,
         MINIMAL_WINDOW_PROMPT,
         schedule,
-        provider=_provider_for_new_job(getattr(args, "provider", None)),
+        provider=provider,
     )
     manager = LaunchdManager(paths)
     result = manager.install(job, dry_run=args.dry_run)
@@ -1324,12 +1404,27 @@ def window_start_at_reset(args: argparse.Namespace, paths: AppPaths) -> int:
             )
         )
         return 0
+    _remove_existing_wake_jobs(paths, provider=provider)
     JobStore(paths).add(job)
     if _args_wants_json(args):
         _emit_json(payload)
         return 0
     print(f"scheduled {job['id']} for {job['schedule']['run_at']}")
     return 0
+
+
+def _remove_existing_wake_jobs(paths: AppPaths, *, provider: str) -> None:
+    store = JobStore(paths)
+    manager = LaunchdManager(paths)
+    for existing in store.list_jobs():
+        if existing.get("name") != "start-window-at-reset":
+            continue
+        if existing.get("provider") != provider:
+            continue
+        if existing.get("status") != "scheduled":
+            continue
+        manager.uninstall(existing, ignore_errors=True)
+        store.remove(existing["id"])
 
 
 def command_logs(args: argparse.Namespace, paths: AppPaths) -> int:

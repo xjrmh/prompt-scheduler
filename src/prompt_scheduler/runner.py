@@ -12,7 +12,18 @@ from .auth import AUTH_REQUIRED_EXIT_CODE, check_provider_auth, looks_like_auth_
 from .ids import make_job_id
 from .launchd import LaunchdManager
 from .paths import AppPaths
-from .providers import CLAUDE, CODEX, find_provider_executable, normalize_provider, provider_spec
+from .providers import (
+    BOTH,
+    CLAUDE,
+    CODEX,
+    expand_provider_selection,
+    find_provider_executable,
+    normalize_provider,
+    normalize_provider_selection,
+    provider_label,
+    provider_spec,
+)
+from . import codex_rate_limits
 from .reset_parser import looks_like_usage_limit, parse_reset_time
 from .schedules import is_due, is_terminal_once_status
 from .storage import JobStore, StateStore, utc_now_iso
@@ -33,6 +44,7 @@ class RunResult:
     message: str | None = None
     claude_response_summary: str | None = None
     provider: str = CLAUDE
+    provider_results: tuple["RunResult", ...] | None = None
 
 
 class RunnerError(RuntimeError):
@@ -174,7 +186,7 @@ def _write_log(
     with log_path.open("w", encoding="utf-8") as handle:
         handle.write(f"job_id: {job.get('id')}\n")
         handle.write(f"name: {job.get('name')}\n")
-        handle.write(f"provider: {_job_provider(job)}\n")
+        handle.write(f"provider: {_job_provider_selection(job)}\n")
         handle.write(f"cwd: {job.get('cwd')}\n")
         handle.write(f"status: {status}\n")
         handle.write(f"exit_code: {exit_code}\n")
@@ -254,8 +266,17 @@ def _record_success_estimate(paths: AppPaths, started_at: str) -> None:
     )
 
 
-def _job_provider(job: dict[str, Any]) -> str:
-    return normalize_provider(job.get("provider"), default=CLAUDE)
+def _refresh_codex_rate_limits(paths: AppPaths) -> None:
+    rate_limits = codex_rate_limits.latest_rate_limits()
+    if rate_limits is None:
+        return
+    StateStore(paths).record_codex_rate_limits(
+        codex_rate_limits.to_state_payload(rate_limits)
+    )
+
+
+def _job_provider_selection(job: dict[str, Any]) -> str:
+    return normalize_provider_selection(job.get("provider"), default=CLAUDE)
 
 
 def _provider_executable(
@@ -342,7 +363,17 @@ def _execute_job(
     timestamp = _timestamp_for_filename(now)
     log_path = paths.logs_dir / f"{job_id}-{timestamp}.log"
     schedule_type = job.get("schedule", {}).get("type")
-    provider = _job_provider(job)
+    provider = _job_provider_selection(job)
+    if provider == BOTH:
+        return _execute_multi_provider_job(
+            job,
+            paths=paths,
+            claude_bin=claude_bin,
+            codex_bin=codex_bin,
+            now=now,
+            persist=persist,
+            cleanup_launchd=cleanup_launchd,
+        )
     spec = provider_spec(provider)
 
     try:
@@ -523,6 +554,8 @@ def _execute_job(
                 StateStore(paths).record_reset(reset_info)
             elif status == "success" and provider == CLAUDE:
                 _record_success_estimate(paths, started_at)
+            if provider == CODEX:
+                _refresh_codex_rate_limits(paths)
             _write_log(
                 log_path,
                 job=job,
@@ -578,6 +611,236 @@ def _execute_job(
         )
 
 
+def _execute_multi_provider_job(
+    job: dict[str, Any],
+    *,
+    paths: AppPaths,
+    claude_bin: str | None = None,
+    codex_bin: str | None = None,
+    now: datetime | None = None,
+    persist: bool = True,
+    cleanup_launchd: bool = True,
+) -> RunResult:
+    paths.ensure()
+    store = JobStore(paths)
+    job_id = job["id"]
+    timestamp = _timestamp_for_filename(now)
+    log_path = paths.logs_dir / f"{job_id}-{timestamp}.log"
+    schedule_type = job.get("schedule", {}).get("type")
+    provider = _job_provider_selection(job)
+
+    try:
+        with JobLock(paths, job_id):
+            started_at = utc_now_iso()
+            job["_started_at"] = started_at
+
+            if schedule_type == "once" and is_terminal_once_status(job.get("status")):
+                _write_log(
+                    log_path,
+                    job=job,
+                    command=None,
+                    status="skipped",
+                    exit_code=0,
+                    note="one-time job already completed",
+                )
+                _cleanup_once(job, paths, cleanup_launchd)
+                return RunResult(
+                    "skipped",
+                    0,
+                    log_path,
+                    message="one-time job already completed",
+                    provider=provider,
+                )
+
+            if not is_due(job, now):
+                _write_log(
+                    log_path,
+                    job=job,
+                    command=None,
+                    status="skipped",
+                    exit_code=0,
+                    note="one-time job is not due yet",
+                )
+                return RunResult(
+                    "skipped",
+                    0,
+                    log_path,
+                    message="one-time job is not due yet",
+                    provider=provider,
+                )
+
+            cwd = Path(job["cwd"]).expanduser()
+            if not cwd.is_dir():
+                status = "failed"
+                stderr = f"cwd does not exist or is not a directory: {cwd}"
+                _write_log(
+                    log_path,
+                    job=job,
+                    command=None,
+                    status=status,
+                    exit_code=1,
+                    stderr=stderr,
+                )
+                _update_after_run(store, job, status, 1, log_path, "", stderr, persist)
+                _cleanup_once(job, paths, cleanup_launchd)
+                return RunResult(status, 1, log_path, message=stderr, provider=provider)
+
+            results: list[RunResult] = []
+            for child_provider in expand_provider_selection(provider):
+                child_job = dict(job)
+                child_job["id"] = f"{job_id}-{child_provider}"
+                child_job["provider"] = child_provider
+                child_job["_started_at"] = started_at
+                results.append(
+                    _execute_job(
+                        child_job,
+                        paths=paths,
+                        claude_bin=claude_bin,
+                        codex_bin=codex_bin,
+                        now=now,
+                        persist=False,
+                        cleanup_launchd=False,
+                    )
+                )
+
+            status = _aggregate_status(results)
+            exit_code = _aggregate_exit_code(results, status)
+            response_summary = _aggregate_response_summary(results)
+            stdout = _aggregate_result_text(results)
+            stderr = _aggregate_error_text(results)
+            reset_info = next(
+                (result.reset_info for result in results if result.reset_info),
+                None,
+            )
+            message = _aggregate_message(results, status)
+
+            _write_log(
+                log_path,
+                job=job,
+                command=None,
+                status=status,
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
+                note="sent prompt to Codex and Claude Code",
+            )
+            _update_after_run(
+                store,
+                job,
+                status,
+                exit_code,
+                log_path,
+                stdout,
+                stderr,
+                persist,
+                provider=provider,
+                response_summary=response_summary,
+            )
+            _cleanup_once(job, paths, cleanup_launchd)
+            return RunResult(
+                status,
+                exit_code,
+                log_path,
+                reset_info,
+                message,
+                response_summary,
+                provider,
+                tuple(results),
+            )
+    except RunnerError:
+        _write_log(
+            log_path,
+            job=job,
+            command=None,
+            status="overlap_skipped",
+            exit_code=2,
+            note="job is already running",
+        )
+        return RunResult(
+            "overlap_skipped",
+            2,
+            log_path,
+            message="job is already running",
+            provider=provider,
+        )
+
+
+def _aggregate_status(results: list[RunResult]) -> str:
+    statuses = [result.status for result in results]
+    if statuses and all(status == "success" for status in statuses):
+        return "success"
+    if any(status == "success" for status in statuses):
+        return "partial_success"
+    if len(set(statuses)) == 1:
+        return statuses[0]
+    for status in (
+        "auth_required",
+        "usage_limit",
+        "timed_out",
+        "overlap_skipped",
+        "failed",
+    ):
+        if status in statuses:
+            return status
+    return statuses[0] if statuses else "failed"
+
+
+def _aggregate_exit_code(results: list[RunResult], status: str) -> int:
+    if status == "success":
+        return 0
+    for result in results:
+        if result.exit_code != 0:
+            return result.exit_code
+    return 1
+
+
+def _aggregate_response_summary(results: list[RunResult]) -> str | None:
+    lines = []
+    for result in results:
+        text = result.claude_response_summary or result.message or result.status
+        if text:
+            lines.append(f"{provider_label(result.provider)}: {text}")
+    return "\n".join(lines) if lines else None
+
+
+def _aggregate_result_text(results: list[RunResult]) -> str:
+    lines = []
+    for result in results:
+        lines.append(
+            f"{provider_label(result.provider)}: {result.status} "
+            f"(exit {result.exit_code}) log={result.log_path}"
+        )
+        text = result.claude_response_summary or result.message
+        if text:
+            lines.append(text)
+    return "\n".join(lines)
+
+
+def _aggregate_error_text(results: list[RunResult]) -> str:
+    lines = []
+    for result in results:
+        if result.status == "success":
+            continue
+        text = result.message or result.status
+        lines.append(f"{provider_label(result.provider)}: {text}")
+    return "\n".join(lines)
+
+
+def _aggregate_message(results: list[RunResult], status: str) -> str | None:
+    if status == "success":
+        return None
+    failures = [
+        f"{provider_label(result.provider)}: {result.message or result.status}"
+        for result in results
+        if result.status != "success"
+    ]
+    if status == "partial_success":
+        return "Some providers failed: " + "; ".join(failures)
+    if failures:
+        return "All providers failed: " + "; ".join(failures)
+    return None
+
+
 def _update_after_run(
     store: JobStore,
     job: dict[str, Any],
@@ -591,9 +854,13 @@ def _update_after_run(
     provider: str | None = None,
     response_summary: str | None = None,
 ) -> None:
-    provider = normalize_provider(provider or job.get("provider"), default=CLAUDE)
+    provider = normalize_provider_selection(provider or job.get("provider"), default=CLAUDE)
     if response_summary is None:
-        response_summary = extract_response_summary(stdout, provider=provider)
+        response_summary = (
+            _truncate(stdout)
+            if provider == BOTH
+            else extract_response_summary(stdout, provider=provider)
+        )
     job.pop("_started_at", None)
     job["provider"] = provider
     job["last_status"] = status
@@ -653,7 +920,7 @@ def run_inline_prompt(
     claude_bin: str | None = None,
     codex_bin: str | None = None,
 ) -> RunResult:
-    provider = normalize_provider(provider, default=CLAUDE)
+    provider = normalize_provider_selection(provider, default=CLAUDE)
     paths = paths or AppPaths.from_env()
     job = {
         "id": make_job_id("manual-window-start"),

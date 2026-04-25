@@ -19,7 +19,8 @@ prompt-scheduler status
 
 `setup` checks your Mac, helps install a missing prompt provider, and offers to
 create your first schedule. Existing schedules without a provider keep using
-Claude Code; pass `--provider codex` for Codex schedules.
+Claude Code; pass `--provider codex`, `--provider claude`, or `--provider both`
+per schedule.
 
 ## Common commands
 
@@ -27,7 +28,7 @@ Claude Code; pass `--provider codex` for Codex schedules.
 prompt-scheduler setup
 
 prompt-scheduler add \
-  --provider codex \
+  --provider both \
   --name morning-review \
   --cwd /path/to/project \
   --daily "09:00" \
@@ -39,6 +40,7 @@ prompt-scheduler status
 prompt-scheduler logs JOB_ID
 
 prompt-scheduler start-now --provider codex --cwd /path/to/project
+prompt-scheduler start-now --provider both --cwd /path/to/project
 prompt-scheduler start-at-reset --cwd /path/to/project
 prompt-scheduler install-statusline
 ```
@@ -60,6 +62,7 @@ prompt-scheduler schedule remove JOB_ID
 prompt-scheduler logs JOB_ID
 
 prompt-scheduler window start-now --provider codex --cwd /path/to/project
+prompt-scheduler window start-now --provider both --cwd /path/to/project
 prompt-scheduler window start-at-reset --cwd /path/to/project
 ```
 
@@ -120,8 +123,9 @@ For Codex, the scheduler checks `codex login status`. Sign in with:
 codex login
 ```
 
-Set `PROMPT_SCHEDULER_PROVIDER=codex` to make Codex the default provider for new
-CLI-created schedules, or pass `--provider codex` per command.
+Set `PROMPT_SCHEDULER_PROVIDER=codex`, `claude`, or `both` to choose the default
+provider for new CLI-created schedules and manual sends, or pass `--provider`
+per command.
 
 ## Local state
 

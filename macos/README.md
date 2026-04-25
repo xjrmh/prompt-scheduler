@@ -5,9 +5,13 @@ Schedule creation and removal stay in the Python CLI; the macOS app exposes
 setup status, manual sends, last-run status, log reveal, and quit actions from
 the menu bar.
 
-The menu bar app follows the CLI's active provider. If Codex is the only signed
-in provider, manual sends run through Codex; otherwise use
-`PROMPT_SCHEDULER_PROVIDER=codex` or CLI `--provider codex` flags to prefer it.
+The menu bar app lets you choose Codex, Claude Code, or both for manual sends.
+The selection is saved in user defaults; before a selection is saved, it follows
+the CLI's active provider.
+
+The app can also create simple daily or weekly message schedules. Use the CLI
+for one-time runs, multi-day weekly ranges, dry runs, removal, and other advanced
+schedule management.
 
 ## Run
 

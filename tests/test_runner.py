@@ -1,7 +1,8 @@
+import json
 import os
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -131,6 +132,134 @@ printf 'Codex OK\\n' > "$output"
             self.assertNotIn("next_estimated_reset_at", StateStore(paths).load())
             args = args_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(args[:3], ["--ask-for-approval", "never", "exec"])
+
+    def test_successful_codex_run_records_rate_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = make_paths(tmp)
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            fake = write_fake_codex(
+                bin_dir,
+                """
+if [ "$1" = "login" ]; then
+  echo 'Logged in using ChatGPT'
+  exit 0
+fi
+output=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    shift
+    output="$1"
+  fi
+  shift
+done
+printf 'Codex OK\\n' > "$output"
+""",
+            )
+
+            codex_home = Path(tmp) / "codex-home"
+            day_dir = codex_home / "sessions" / "2026" / "04" / "24"
+            day_dir.mkdir(parents=True)
+            primary_at = 1777072414
+            secondary_at = 1777400497
+            event = json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "rate_limits": {
+                            "primary": {"resets_at": primary_at, "window_minutes": 300, "used_percent": 23.0},
+                            "secondary": {"resets_at": secondary_at, "window_minutes": 10080, "used_percent": 91.0},
+                            "plan_type": "prolite",
+                        },
+                    },
+                }
+            )
+            (day_dir / "rollout-x.jsonl").write_text(event + "\n", encoding="utf-8")
+
+            job = make_job(tmp)
+            job["provider"] = "codex"
+            JobStore(paths).add(job)
+
+            previous = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = str(codex_home)
+            try:
+                result = run_job(
+                    job["id"],
+                    paths=paths,
+                    codex_bin=str(fake),
+                    cleanup_launchd=False,
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = previous
+
+            self.assertEqual(result.status, "success")
+            state = StateStore(paths).load()
+            expected_primary = datetime.fromtimestamp(primary_at, tz=timezone.utc).isoformat()
+            expected_secondary = datetime.fromtimestamp(secondary_at, tz=timezone.utc).isoformat()
+            self.assertEqual(state["codex_next_reset_at"], expected_primary)
+            self.assertEqual(state["codex_weekly_reset_at"], expected_secondary)
+            self.assertEqual(state["codex_rate_limits"]["plan_type"], "prolite")
+            self.assertIn("codex_rate_limits_updated_at", state)
+
+    def test_both_provider_run_sends_to_codex_and_claude(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = make_paths(tmp)
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            fake_claude = write_fake_claude(
+                bin_dir,
+                """
+if [ "$1" = "auth" ]; then
+  echo '{"loggedIn":true,"authMethod":"claude.ai"}'
+  exit 0
+fi
+echo '{"result":"Claude OK"}'
+""",
+            )
+            fake_codex = write_fake_codex(
+                bin_dir,
+                """
+if [ "$1" = "login" ]; then
+  echo 'Logged in using ChatGPT'
+  exit 0
+fi
+output=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    shift
+    output="$1"
+  fi
+  shift
+done
+printf 'Codex OK\\n' > "$output"
+""",
+            )
+            job = make_job(tmp)
+            job["provider"] = "both"
+            JobStore(paths).add(job)
+
+            result = run_job(
+                job["id"],
+                paths=paths,
+                claude_bin=str(fake_claude),
+                codex_bin=str(fake_codex),
+                cleanup_launchd=False,
+            )
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(result.provider, "both")
+            self.assertEqual(len(result.provider_results or ()), 2)
+            self.assertIn("Codex: Codex OK", result.claude_response_summary or "")
+            self.assertIn("Claude Code: Claude OK", result.claude_response_summary or "")
+            updated = JobStore(paths).get(job["id"])
+            self.assertEqual(updated["provider"], "both")
+            self.assertEqual(updated["run_count"], 1)
+            self.assertIn("Codex: Codex OK", updated["last_response_summary"])
+            self.assertIn("Claude Code: Claude OK", updated["last_response_summary"])
 
     def test_usage_limit_records_reset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

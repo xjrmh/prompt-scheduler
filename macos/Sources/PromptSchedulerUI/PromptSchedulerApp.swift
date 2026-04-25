@@ -13,6 +13,6 @@ struct PromptSchedulerApp: App {
             Image(nsImage: MenuBarIcon.image(for: controller.menuBarIconState))
                 .accessibilityLabel(controller.menuBarIconAccessibilityLabel)
         }
-        .menuBarExtraStyle(.menu)
+        .menuBarExtraStyle(.window)
     }
 }
