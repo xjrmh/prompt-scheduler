@@ -179,7 +179,7 @@ enum WakeLoopInterval: String, CaseIterable, Identifiable {
         case .every30Min:
             "30 min"
         case .everyHour:
-            "1 h"
+            "1 hour"
         case .every2Hours:
             "2 h"
         }
@@ -197,6 +197,14 @@ enum WakeLoopInterval: String, CaseIterable, Identifiable {
         default:
             return nil
         }
+    }
+
+    init?(storedValue: String?) {
+        guard let value = storedValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let interval = WakeLoopInterval(rawValue: value) else {
+            return nil
+        }
+        self = interval
     }
 }
 
@@ -284,6 +292,7 @@ final class AppController: ObservableObject {
     @Published var message: String?
     @Published var lastManualSend: ManualSendStatus?
     @Published private var selectedSendProvider: String?
+    @Published private var selectedWakeLoopInterval: WakeLoopInterval
     @Published var wakeLoopPrompt: String
     @Published var claudeModelDefault: String
     @Published var codexModelDefault: String
@@ -291,6 +300,9 @@ final class AppController: ObservableObject {
     private let engine: EngineClient
     private static let sendProviderDefaultsKey = "PromptScheduler.SendProvider"
     private static let sendProviderChoices = ["codex", "claude", "both"]
+    private static let defaultSendProvider = "claude"
+    private static let wakeLoopIntervalDefaultsKey = "PromptScheduler.WakeLoopInterval"
+    private static let defaultWakeLoopInterval = WakeLoopInterval.everyHour
     static let wakeLoopPromptDefaultsKey = "PromptScheduler.WakeLoopPrompt"
     static let defaultWakeLoopPrompt = "Reply with exactly OK."
     static let claudeModelDefaultsKey = "PromptScheduler.ClaudeModel"
@@ -305,13 +317,25 @@ final class AppController: ObservableObject {
 
     init(engine: EngineClient = EngineClient()) {
         self.engine = engine
-        self.selectedSendProvider = Self.validSendProvider(
-            UserDefaults.standard.string(forKey: Self.sendProviderDefaultsKey)
-        )
-        let storedPrompt = UserDefaults.standard.string(forKey: Self.wakeLoopPromptDefaultsKey)
+        let defaults = UserDefaults.standard
+        let storedSendProvider = defaults.string(forKey: Self.sendProviderDefaultsKey)
+        let sendProvider = Self.validSendProvider(storedSendProvider) ?? Self.defaultSendProvider
+        self.selectedSendProvider = sendProvider
+        if storedSendProvider != sendProvider {
+            defaults.set(sendProvider, forKey: Self.sendProviderDefaultsKey)
+        }
+
+        let storedWakeLoopInterval = defaults.string(forKey: Self.wakeLoopIntervalDefaultsKey)
+        let wakeLoopInterval = WakeLoopInterval(storedValue: storedWakeLoopInterval) ?? Self.defaultWakeLoopInterval
+        self.selectedWakeLoopInterval = wakeLoopInterval
+        if storedWakeLoopInterval != wakeLoopInterval.rawValue {
+            defaults.set(wakeLoopInterval.rawValue, forKey: Self.wakeLoopIntervalDefaultsKey)
+        }
+
+        let storedPrompt = defaults.string(forKey: Self.wakeLoopPromptDefaultsKey)
         self.wakeLoopPrompt = (storedPrompt?.isEmpty == false ? storedPrompt! : Self.defaultWakeLoopPrompt)
-        self.claudeModelDefault = UserDefaults.standard.string(forKey: Self.claudeModelDefaultsKey) ?? ""
-        self.codexModelDefault = UserDefaults.standard.string(forKey: Self.codexModelDefaultsKey) ?? Self.defaultCodexModel
+        self.claudeModelDefault = defaults.string(forKey: Self.claudeModelDefaultsKey) ?? ""
+        self.codexModelDefault = defaults.string(forKey: Self.codexModelDefaultsKey) ?? Self.defaultCodexModel
     }
 
     func setClaudeModelDefault(_ value: String) {
@@ -354,7 +378,7 @@ final class AppController: ObservableObject {
     }
 
     var sendProviderSelection: String {
-        selectedSendProvider ?? "both"
+        selectedSendProvider ?? Self.defaultSendProvider
     }
 
     var sendProviderLabel: String {
@@ -392,6 +416,10 @@ final class AppController: ObservableObject {
     }
 
     var currentWakeLoopInterval: WakeLoopInterval {
+        scheduledWakeLoopInterval ?? selectedWakeLoopInterval
+    }
+
+    private var scheduledWakeLoopInterval: WakeLoopInterval? {
         let jobs = status?.jobs ?? []
         for job in jobs {
             guard job.name == "wake-loop", (job.status ?? "") == "scheduled" else { continue }
@@ -399,7 +427,7 @@ final class AppController: ObservableObject {
                 return interval
             }
         }
-        return .off
+        return nil
     }
 
     var providerStatusLines: [String] {
@@ -548,6 +576,8 @@ final class AppController: ObservableObject {
                 }
                 message = "Wake-up loop set to \(interval.label)."
             }
+            selectedWakeLoopInterval = interval
+            UserDefaults.standard.set(interval.rawValue, forKey: Self.wakeLoopIntervalDefaultsKey)
             do {
                 status = try await engine.status()
             } catch {
@@ -561,8 +591,7 @@ final class AppController: ObservableObject {
         let next = trimmed.isEmpty ? Self.defaultWakeLoopPrompt : trimmed
         wakeLoopPrompt = next
         UserDefaults.standard.set(next, forKey: Self.wakeLoopPromptDefaultsKey)
-        let active = currentWakeLoopInterval
-        if active != .off {
+        if let active = scheduledWakeLoopInterval {
             await setWakeLoopInterval(active)
         }
     }

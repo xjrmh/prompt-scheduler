@@ -4,6 +4,19 @@ import AppKit
 
 struct MenuBarContent: View {
     @ObservedObject var controller: AppController
+    private static let popoverWidth: CGFloat = 320
+    private static let selectorHorizontalPadding: CGFloat = 12
+    private static let selectorWidth = popoverWidth - (selectorHorizontalPadding * 2)
+    private static let sendProviderOptions: [PopoverSegmentedPicker<String>.Option] = [
+        .init(label: "Codex", value: "codex"),
+        .init(label: "Claude Code", value: "claude"),
+        .init(label: "Both", value: "both"),
+    ]
+    private static let wakeLoopOptions: [PopoverSegmentedPicker<WakeLoopInterval>.Option] = [
+        .init(label: "Off", value: .off),
+        .init(label: "30 min", value: .every30Min),
+        .init(label: "1 hour", value: .everyHour),
+    ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -18,18 +31,14 @@ struct MenuBarContent: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 PopoverSectionHeader("Send With")
-                Picker("Send With", selection: Binding(
-                    get: { controller.sendProviderSelection },
-                    set: { controller.setSendProviderSelection($0) }
-                )) {
-                    Text("Codex").tag("codex")
-                    Text("Claude Code").tag("claude")
-                    Text("Both").tag("both")
+                PopoverSegmentedPicker(
+                    options: Self.sendProviderOptions,
+                    selection: controller.sendProviderSelection
+                ) { provider in
+                    controller.setSendProviderSelection(provider)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 12)
+                .frame(width: Self.selectorWidth)
+                .padding(.horizontal, Self.selectorHorizontalPadding)
             }
             .padding(.bottom, 4)
 
@@ -48,21 +57,14 @@ struct MenuBarContent: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 PopoverSectionHeader("Send Wake-Up Prompt Every")
-                Picker("Wake Up Every", selection: Binding(
-                    get: { controller.currentWakeLoopInterval },
-                    set: { newValue in
-                        Task { await controller.setWakeLoopInterval(newValue) }
-                    }
-                )) {
-                    Text("Off").tag(WakeLoopInterval.off)
-                    Text("30 min").tag(WakeLoopInterval.every30Min)
-                    Text("1 h").tag(WakeLoopInterval.everyHour)
-                    Text("2 h").tag(WakeLoopInterval.every2Hours)
+                PopoverSegmentedPicker(
+                    options: Self.wakeLoopOptions,
+                    selection: controller.currentWakeLoopInterval
+                ) { newValue in
+                    Task { await controller.setWakeLoopInterval(newValue) }
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 12)
+                .frame(width: Self.selectorWidth)
+                .padding(.horizontal, Self.selectorHorizontalPadding)
                 .disabled(controller.isLoading || !controller.isReady)
             }
             .padding(.bottom, 4)
@@ -132,7 +134,7 @@ struct MenuBarContent: View {
             .keyboardShortcut("q", modifiers: .command)
         }
         .padding(.vertical, 6)
-        .frame(width: 320, alignment: .leading)
+        .frame(width: Self.popoverWidth, alignment: .leading)
         .task {
             await controller.refresh()
         }
@@ -238,6 +240,84 @@ private struct PopoverSectionHeader: View {
     }
 }
 
+private struct PopoverSegmentedPicker<Value: Hashable>: View {
+    struct Option: Identifiable {
+        let label: String
+        let value: Value
+
+        var id: Value { value }
+    }
+
+    let options: [Option]
+    let selection: Value
+    let onSelect: (Value) -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(options.indices, id: \.self) { index in
+                segment(for: options[index])
+
+                if index < options.count - 1 {
+                    separator(after: index)
+                }
+            }
+        }
+        .padding(1)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(backgroundFill)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .opacity(isEnabled ? 1.0 : 0.45)
+        .animation(.easeOut(duration: 0.12), value: selectedIndex)
+    }
+
+    private func segment(for option: Option) -> some View {
+        Button {
+            onSelect(option.value)
+        } label: {
+            Text(option.label)
+                .font(.body)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .foregroundStyle(option.value == selection ? Color.white : Color.primary)
+                .frame(maxWidth: .infinity, minHeight: 30)
+                .contentShape(Rectangle())
+                .background {
+                    if option.value == selection {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.accentColor)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+    }
+
+    private func separator(after index: Int) -> some View {
+        Rectangle()
+            .fill(Color.primary.opacity(colorScheme == .dark ? 0.22 : 0.12))
+            .frame(width: 1, height: 18)
+            .opacity(separatorIsAdjacentToSelection(after: index) ? 0 : 1)
+            .padding(.horizontal, 1)
+    }
+
+    private func separatorIsAdjacentToSelection(after index: Int) -> Bool {
+        options[index].value == selection || options[index + 1].value == selection
+    }
+
+    private var selectedIndex: Int? {
+        options.firstIndex { $0.value == selection }
+    }
+
+    private var backgroundFill: Color {
+        Color.primary.opacity(colorScheme == .dark ? 0.18 : 0.08)
+    }
+}
+
 private struct PopoverSecondaryRow: View {
     let title: String
     let systemImage: String
@@ -314,7 +394,6 @@ private struct PopoverProviderSection: View {
 
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 4) {
                 row("Status", summary.status)
-                row("Next Usage Reset", summary.nextUsageStart)
                 row("Last Sent Time", summary.lastSentTime)
                 row("Last Sent Status", summary.lastSentStatus)
             }
