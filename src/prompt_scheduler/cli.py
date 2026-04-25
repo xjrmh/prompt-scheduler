@@ -40,7 +40,14 @@ from .runner import (
     run_inline_prompt,
     run_job,
 )
-from .schedules import ScheduleError, format_schedule, parse_once, parse_schedule
+from .schedules import (
+    INTERVAL_CHOICES,
+    ScheduleError,
+    format_schedule,
+    parse_interval,
+    parse_once,
+    parse_schedule,
+)
 from .storage import JobStore, StateStore, utc_now_iso
 
 
@@ -116,6 +123,34 @@ def build_parser() -> argparse.ArgumentParser:
     start_reset.add_argument("--buffer-minutes", type=int, default=2)
     start_reset.add_argument("--dry-run", action="store_true")
     _add_json_flag(start_reset)
+
+    wake_loop = subparsers.add_parser(
+        "wake-loop",
+        help="Manage a recurring wake-up prompt that fires every 30 min, 1 h, or 2 h.",
+    )
+    wake_loop_sub = wake_loop.add_subparsers(dest="wake_loop_command", required=True)
+    wake_loop_start = wake_loop_sub.add_parser(
+        "start", help="Install the recurring wake-up prompt."
+    )
+    _add_provider_arg(wake_loop_start, include_both=True)
+    wake_loop_start.add_argument("--cwd", required=True)
+    wake_loop_start.add_argument(
+        "--every",
+        required=True,
+        choices=tuple(INTERVAL_CHOICES),
+        help="Wake-up interval: 30m, 1h, or 2h.",
+    )
+    wake_loop_start.add_argument(
+        "--prompt",
+        required=True,
+        help="Prompt text to send on each interval.",
+    )
+    wake_loop_start.add_argument("--dry-run", action="store_true")
+    _add_json_flag(wake_loop_start)
+    wake_loop_stop = wake_loop_sub.add_parser(
+        "stop", help="Remove the recurring wake-up prompt if installed."
+    )
+    _add_json_flag(wake_loop_stop)
 
     schedule = subparsers.add_parser("schedule", help="Manage scheduled jobs.")
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
@@ -258,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.cwd is None:
                 args.cwd = str(Path.cwd())
             return window_start_at_reset(args, paths)
+        if args.command == "wake-loop":
+            return command_wake_loop(args, paths)
         if args.command == "schedule":
             return command_schedule(args, paths)
         if args.command == "run":
@@ -1425,6 +1462,96 @@ def _remove_existing_wake_jobs(paths: AppPaths, *, provider: str) -> None:
             continue
         manager.uninstall(existing, ignore_errors=True)
         store.remove(existing["id"])
+
+
+def _remove_existing_jobs_named(paths: AppPaths, *, name: str) -> list[dict[str, Any]]:
+    store = JobStore(paths)
+    manager = LaunchdManager(paths)
+    removed: list[dict[str, Any]] = []
+    for existing in store.list_jobs():
+        if existing.get("name") != name:
+            continue
+        if existing.get("status") != "scheduled":
+            continue
+        manager.uninstall(existing, ignore_errors=True)
+        store.remove(existing["id"])
+        removed.append(existing)
+    return removed
+
+
+WAKE_LOOP_JOB_NAME = "wake-loop"
+
+
+def command_wake_loop(args: argparse.Namespace, paths: AppPaths) -> int:
+    if args.wake_loop_command == "start":
+        return _wake_loop_start(args, paths)
+    if args.wake_loop_command == "stop":
+        return _wake_loop_stop(args, paths)
+    raise ValueError(f"unknown wake-loop command: {args.wake_loop_command}")
+
+
+def _wake_loop_start(args: argparse.Namespace, paths: AppPaths) -> int:
+    provider = _provider_for_new_job(getattr(args, "provider", None))
+    schedule = parse_interval(args.every)
+    job = _build_job(
+        WAKE_LOOP_JOB_NAME,
+        args.cwd,
+        args.prompt,
+        schedule,
+        provider=provider,
+    )
+    manager = LaunchdManager(paths)
+    result = manager.install(job, dry_run=args.dry_run)
+    payload = {
+        "ok": True,
+        "job": _job_payload(job),
+        "launchd": {
+            "label": result.label,
+            "path": str(result.plist_path),
+            "plist": result.plist,
+            "loaded": result.loaded,
+        },
+    }
+    if args.dry_run:
+        if _args_wants_json(args):
+            _emit_json(payload)
+            return 0
+        print(
+            json.dumps(
+                {
+                    "job": job,
+                    "launchd": {"path": str(result.plist_path), "plist": result.plist},
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    _remove_existing_jobs_named(paths, name=WAKE_LOOP_JOB_NAME)
+    JobStore(paths).add(job)
+    if _args_wants_json(args):
+        _emit_json(payload)
+        return 0
+    print(f"scheduled {job['id']} every {schedule['every']}")
+    return 0
+
+
+def _wake_loop_stop(args: argparse.Namespace, paths: AppPaths) -> int:
+    removed = _remove_existing_jobs_named(paths, name=WAKE_LOOP_JOB_NAME)
+    if _args_wants_json(args):
+        _emit_json(
+            {
+                "ok": True,
+                "removed": _job_payload(removed[0]) if removed else None,
+            }
+        )
+        return 0
+    if not removed:
+        print("no wake-loop is installed")
+        return 0
+    for job in removed:
+        print(f"removed {job['id']}")
+    return 0
 
 
 def command_logs(args: argparse.Namespace, paths: AppPaths) -> int:

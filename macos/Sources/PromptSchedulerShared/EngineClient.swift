@@ -84,6 +84,29 @@ public final class EngineClient: Sendable {
         return try await runJSON(args, as: ScheduleAddResponse.self)
     }
 
+    public func startWakeLoop(
+        cwd: String,
+        provider: String?,
+        every: String,
+        prompt: String
+    ) async throws -> ScheduleAddResponse {
+        var args = [
+            "wake-loop", "start",
+            "--cwd", cwd,
+            "--every", every,
+            "--prompt", prompt,
+        ]
+        if let provider, !provider.isEmpty {
+            args.append(contentsOf: ["--provider", provider])
+        }
+        args.append("--json")
+        return try await runJSON(args, as: ScheduleAddResponse.self)
+    }
+
+    public func stopWakeLoop() async throws -> ScheduleRemoveResponse {
+        return try await runJSON(["wake-loop", "stop", "--json"], as: ScheduleRemoveResponse.self)
+    }
+
     public func addSchedule(
         name: String,
         cwd: String,

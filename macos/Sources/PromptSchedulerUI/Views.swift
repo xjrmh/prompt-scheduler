@@ -54,12 +54,32 @@ struct MenuBarContent: View {
             }
             .disabled(controller.isLoading || !controller.isReady)
 
-            Button {
-                Task { await controller.startAtNextUsageWindow() }
-            } label: {
-                Label("Send Prompt at Next Usage Reset", systemImage: "clock.arrow.circlepath")
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Send Wake Up Prompt Every")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Picker("Wake Up Every", selection: Binding(
+                    get: { controller.currentWakeLoopInterval },
+                    set: { newValue in
+                        Task { await controller.setWakeLoopInterval(newValue) }
+                    }
+                )) {
+                    ForEach(WakeLoopInterval.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .disabled(controller.isLoading || !controller.isReady)
+
+                Button {
+                    WakePromptHost.shared.show(controller: controller)
+                } label: {
+                    Label("Edit Wake Prompt...", systemImage: "pencil")
+                }
+                .disabled(controller.isLoading)
             }
-            .disabled(controller.isLoading || !controller.canStartAtNextUsageWindow)
 
             Button {
                 ScheduleWindowHost.shared.show(controller: controller)
@@ -246,6 +266,107 @@ private final class ScheduleWindowHost {
     private func close() {
         window?.close()
         window = nil
+    }
+}
+
+@MainActor
+private final class WakePromptHost {
+    static let shared = WakePromptHost()
+
+    private var window: NSWindow?
+
+    func show(controller: AppController) {
+        if let window, window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let rootView = WakePromptEditView(controller: controller) { [weak self] in
+            self?.close()
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 240),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Edit Wake Prompt"
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: rootView)
+        window.center()
+        self.window = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func close() {
+        window?.close()
+        window = nil
+    }
+}
+
+private struct WakePromptEditView: View {
+    @ObservedObject var controller: AppController
+    var onClose: () -> Void
+
+    @State private var prompt: String
+    @State private var isSaving = false
+
+    init(controller: AppController, onClose: @escaping () -> Void) {
+        self.controller = controller
+        self.onClose = onClose
+        _prompt = State(initialValue: controller.wakeLoopPrompt)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Edit Wake Prompt")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+            }
+
+            Text("Sent on every wake-up tick. Saving while a loop is running re-installs it with the new prompt.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            TextEditor(text: $prompt)
+                .frame(minHeight: 84)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.secondary.opacity(0.35))
+                )
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    onClose()
+                }
+                Button("Save") {
+                    save()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(isSaving || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(18)
+        .frame(width: 380)
+    }
+
+    private func save() {
+        isSaving = true
+        Task { @MainActor in
+            await controller.setWakeLoopPrompt(prompt)
+            isSaving = false
+            onClose()
+        }
     }
 }
 
@@ -531,6 +652,9 @@ private struct ScheduledJobRow: View {
     }
 
     private var displayTitle: String {
+        if job.name == "wake-loop" {
+            return "Wake-up loop"
+        }
         if job.name == "start-window-at-reset" {
             let label = job.providerLabel ?? job.provider ?? "provider"
             return "Wake \(label) at next reset"
@@ -560,6 +684,15 @@ private struct ScheduledJobRow: View {
                 if let formatted = formatTimeOfDay(String(timeText)) {
                     return "Weekly \(days) at \(formatted)"
                 }
+            }
+        }
+        if raw.hasPrefix("every ") {
+            let token = String(raw.dropFirst("every ".count))
+            switch token {
+            case "30m": return "Every 30 min"
+            case "1h":  return "Every 1 h"
+            case "2h":  return "Every 2 h"
+            default:    return "Every \(token)"
             }
         }
         if raw == "manual" {

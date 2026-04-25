@@ -180,6 +180,65 @@ final class EngineClientTests: XCTestCase {
         XCTAssertEqual(response.job?.scheduleLabel, "once at 2026-04-25 09:02")
     }
 
+    func testBuildsStartWakeLoopCommand() async throws {
+        let client = EngineClient(
+            commandResolver: {
+                EngineCommand(executable: "/usr/local/bin/prompt-scheduler")
+            },
+            runProcess: { command in
+                XCTAssertEqual(
+                    command.arguments,
+                    [
+                        "wake-loop", "start",
+                        "--cwd", "/tmp/project",
+                        "--every", "30m",
+                        "--prompt", "Reply with exactly OK.",
+                        "--provider", "both",
+                        "--json"
+                    ]
+                )
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: #"{"ok":true,"job":{"id":"wake-loop-1234","name":"wake-loop","cwd":"/tmp/project","provider":"both","provider_label":"Codex + Claude Code","schedule_label":"every 30m","status":"scheduled"}}"#.data(using: .utf8)!
+                )
+            }
+        )
+
+        let response = try await client.startWakeLoop(
+            cwd: "/tmp/project",
+            provider: "both",
+            every: "30m",
+            prompt: "Reply with exactly OK."
+        )
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.job?.name, "wake-loop")
+        XCTAssertEqual(response.job?.scheduleLabel, "every 30m")
+    }
+
+    func testBuildsStopWakeLoopCommand() async throws {
+        let client = EngineClient(
+            commandResolver: {
+                EngineCommand(executable: "/usr/local/bin/prompt-scheduler")
+            },
+            runProcess: { command in
+                XCTAssertEqual(
+                    command.arguments,
+                    ["wake-loop", "stop", "--json"]
+                )
+                return ProcessResult(
+                    exitCode: 0,
+                    stdout: #"{"ok":true,"removed":{"id":"wake-loop-1234","name":"wake-loop","status":"scheduled"}}"#.data(using: .utf8)!
+                )
+            }
+        )
+
+        let response = try await client.stopWakeLoop()
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.removed?.name, "wake-loop")
+    }
+
     func testBuildsAddScheduleCommand() async throws {
         let client = EngineClient(
             commandResolver: {

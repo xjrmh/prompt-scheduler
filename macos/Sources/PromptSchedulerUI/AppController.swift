@@ -45,28 +45,6 @@ struct ManualSendStatus: Equatable {
         )
     }
 
-    static func scheduling(providerLabel: String, provider: String, timestamp: Date = Date()) -> ManualSendStatus {
-        ManualSendStatus(
-            tone: .pending,
-            title: "Scheduling send",
-            detail: "Scheduling \(providerLabel) for the next usage reset.",
-            timestamp: timestamp,
-            provider: provider,
-            kind: .schedule
-        )
-    }
-
-    static func scheduled(scheduleLabel: String, provider: String, timestamp: Date = Date()) -> ManualSendStatus {
-        ManualSendStatus(
-            tone: .success,
-            title: "Send scheduled",
-            detail: "Scheduled \(scheduleLabel).",
-            timestamp: timestamp,
-            provider: provider,
-            kind: .schedule
-        )
-    }
-
     static func finished(
         response: RunResponse,
         provider fallbackProvider: String? = nil,
@@ -186,6 +164,42 @@ enum SimpleScheduleKind: String, CaseIterable, Identifiable {
     }
 }
 
+enum WakeLoopInterval: String, CaseIterable, Identifiable {
+    case off
+    case every30Min = "30m"
+    case everyHour = "1h"
+    case every2Hours = "2h"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .off:
+            "Off"
+        case .every30Min:
+            "30 min"
+        case .everyHour:
+            "1 h"
+        case .every2Hours:
+            "2 h"
+        }
+    }
+
+    init?(scheduleLabel: String?) {
+        guard let label = scheduleLabel else { return nil }
+        switch label {
+        case "every 30m":
+            self = .every30Min
+        case "every 1h":
+            self = .everyHour
+        case "every 2h":
+            self = .every2Hours
+        default:
+            return nil
+        }
+    }
+}
+
 enum SimpleScheduleWeekday: String, CaseIterable, Identifiable {
     case mon = "Mon"
     case tue = "Tue"
@@ -258,10 +272,13 @@ final class AppController: ObservableObject {
     @Published var message: String?
     @Published var lastManualSend: ManualSendStatus?
     @Published private var selectedSendProvider: String?
+    @Published var wakeLoopPrompt: String
 
     private let engine: EngineClient
     private static let sendProviderDefaultsKey = "PromptScheduler.SendProvider"
     private static let sendProviderChoices = ["codex", "claude", "both"]
+    static let wakeLoopPromptDefaultsKey = "PromptScheduler.WakeLoopPrompt"
+    static let defaultWakeLoopPrompt = "Reply with exactly OK."
     private static let summaryDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .short
@@ -274,6 +291,8 @@ final class AppController: ObservableObject {
         self.selectedSendProvider = Self.validSendProvider(
             UserDefaults.standard.string(forKey: Self.sendProviderDefaultsKey)
         )
+        let storedPrompt = UserDefaults.standard.string(forKey: Self.wakeLoopPromptDefaultsKey)
+        self.wakeLoopPrompt = (storedPrompt?.isEmpty == false ? storedPrompt! : Self.defaultWakeLoopPrompt)
     }
 
     var activeProvider: String? {
@@ -343,13 +362,15 @@ final class AppController: ObservableObject {
         providerDisplayOrder.map { providerSummary(for: $0) }
     }
 
-    var canStartAtNextUsageWindow: Bool {
-        guard isReady else {
-            return false
+    var currentWakeLoopInterval: WakeLoopInterval {
+        let jobs = status?.jobs ?? []
+        for job in jobs {
+            guard job.name == "wake-loop", (job.status ?? "") == "scheduled" else { continue }
+            if let interval = WakeLoopInterval(scheduleLabel: job.scheduleLabel) {
+                return interval
+            }
         }
-        return providerKeys(for: sendProviderSelection).allSatisfy { provider in
-            nextUsageStartDate(for: provider) != nil
-        }
+        return .off
     }
 
     var providerStatusLines: [String] {
@@ -473,61 +494,47 @@ final class AppController: ObservableObject {
         }
     }
 
-    func startAtNextUsageWindow(cwd: String? = nil) async {
-        if !isReady {
-            let detail = sendProviderReadinessIssue ?? "\(sendProviderLabel) is not ready."
-            let sendStatus = ManualSendStatus.failed(
-                detail,
-                provider: sendProviderSelection,
-                kind: .schedule
-            )
-            lastManualSend = sendStatus
-            message = sendStatus.title
-            return
-        }
+    func setWakeLoopInterval(_ interval: WakeLoopInterval) async {
         let provider = sendProviderSelection
-        lastManualSend = .scheduling(providerLabel: sendProviderLabel, provider: provider)
-        await runTask(onError: { [weak self, provider] error in
-            let status = ManualSendStatus.failed(
-                error.localizedDescription,
-                provider: provider,
-                kind: .schedule
-            )
-            self?.lastManualSend = status
-            self?.message = status.title
-        }) {
-            guard canStartAtNextUsageWindow else {
-                let status = ManualSendStatus.failed(
-                    "No next usage reset is available for \(sendProviderLabel).",
+        await runTask {
+            if interval == .off {
+                let response = try await engine.stopWakeLoop()
+                if !response.ok {
+                    message = response.error ?? "Could not stop the wake-up loop."
+                    return
+                }
+                message = "Wake-up loop stopped."
+            } else {
+                let targetFolder = defaultFolder
+                try ensureDefaultFolderIfNeeded(targetFolder)
+                let response = try await engine.startWakeLoop(
+                    cwd: targetFolder,
                     provider: provider,
-                    kind: .schedule
+                    every: interval.rawValue,
+                    prompt: wakeLoopPrompt
                 )
-                lastManualSend = status
-                message = status.title
-                return
+                if !response.ok {
+                    message = response.error ?? "Could not start the wake-up loop."
+                    return
+                }
+                message = "Wake-up loop set to \(interval.label)."
             }
-            let targetFolder = cwd ?? defaultFolder
-            try ensureDefaultFolderIfNeeded(targetFolder)
-            let response = try await engine.startAtReset(cwd: targetFolder, provider: provider)
-            guard response.ok else {
-                let status = ManualSendStatus.failed(
-                    response.error ?? "Could not schedule the next usage reset send.",
-                    provider: provider,
-                    kind: .schedule
-                )
-                lastManualSend = status
-                message = status.title
-                return
-            }
-            let scheduleLabel = response.job?.scheduleLabel ?? "next usage reset"
-            let sendStatus = ManualSendStatus.scheduled(scheduleLabel: scheduleLabel, provider: provider)
-            lastManualSend = sendStatus
-            message = sendStatus.title
             do {
                 status = try await engine.status()
             } catch {
-                message = "\(sendStatus.title). Could not refresh status: \(error.localizedDescription)"
+                message = "Wake-up loop updated. Could not refresh status: \(error.localizedDescription)"
             }
+        }
+    }
+
+    func setWakeLoopPrompt(_ text: String) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let next = trimmed.isEmpty ? Self.defaultWakeLoopPrompt : trimmed
+        wakeLoopPrompt = next
+        UserDefaults.standard.set(next, forKey: Self.wakeLoopPromptDefaultsKey)
+        let active = currentWakeLoopInterval
+        if active != .off {
+            await setWakeLoopInterval(active)
         }
     }
 

@@ -29,6 +29,12 @@ LAUNCHD_WEEKDAYS = {
     "sat": 6,
 }
 
+INTERVAL_CHOICES: dict[str, int] = {
+    "30m": 30 * 60,
+    "1h": 60 * 60,
+    "2h": 2 * 60 * 60,
+}
+
 
 def _now() -> datetime:
     return datetime.now().astimezone()
@@ -103,18 +109,35 @@ def parse_weekly(value: str) -> dict[str, Any]:
     }
 
 
+def parse_interval(value: str) -> dict[str, Any]:
+    key = value.strip().lower()
+    if key not in INTERVAL_CHOICES:
+        raise ScheduleError(
+            "interval must be one of: " + ", ".join(INTERVAL_CHOICES)
+        )
+    return {"type": "interval", "every": key, "seconds": INTERVAL_CHOICES[key]}
+
+
 def parse_schedule(
-    *, at: str | None = None, daily: str | None = None, weekly: str | None = None
+    *,
+    at: str | None = None,
+    daily: str | None = None,
+    weekly: str | None = None,
+    every: str | None = None,
 ) -> dict[str, Any]:
-    selected = [value is not None for value in (at, daily, weekly)].count(True)
+    selected = [value is not None for value in (at, daily, weekly, every)].count(True)
     if selected != 1:
-        raise ScheduleError("choose exactly one of --at, --daily, or --weekly")
+        raise ScheduleError(
+            "choose exactly one of --at, --daily, --weekly, or --every"
+        )
     if at is not None:
         return parse_once(at)
     if daily is not None:
         return parse_daily(daily)
     if weekly is not None:
         return parse_weekly(weekly)
+    if every is not None:
+        return parse_interval(every)
     raise ScheduleError("missing schedule")
 
 
@@ -169,6 +192,8 @@ def format_schedule(schedule: dict[str, Any]) -> str:
     if schedule_type == "weekly":
         days = ",".join(schedule.get("day_names", [str(d) for d in schedule["days"]]))
         return f"weekly {days} at {schedule['time']}"
+    if schedule_type == "interval":
+        return f"every {schedule['every']}"
     if schedule_type == "manual":
         return "manual"
     return str(schedule)

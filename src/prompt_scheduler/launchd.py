@@ -48,7 +48,7 @@ class LaunchdManager:
         env.update(self.paths.environment_overrides())
         log_stdout = self.paths.logs_dir / f"{job['id']}.launchd.out.log"
         log_stderr = self.paths.logs_dir / f"{job['id']}.launchd.err.log"
-        return {
+        plist: dict[str, Any] = {
             "Label": self.label_for_job(job),
             "ProgramArguments": [
                 sys.executable,
@@ -59,10 +59,15 @@ class LaunchdManager:
             ],
             "EnvironmentVariables": env,
             "RunAtLoad": False,
-            "StartCalendarInterval": schedule_to_start_calendar(job["schedule"]),
             "StandardOutPath": str(log_stdout),
             "StandardErrorPath": str(log_stderr),
         }
+        schedule = job["schedule"]
+        if schedule.get("type") == "interval":
+            plist["StartInterval"] = int(schedule["seconds"])
+        else:
+            plist["StartCalendarInterval"] = schedule_to_start_calendar(schedule)
+        return plist
 
     def write_plist(self, job: dict[str, Any]) -> Path:
         self.paths.ensure()
