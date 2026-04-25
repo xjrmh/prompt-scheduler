@@ -132,40 +132,48 @@ class StateStore:
         _atomic_write_json(self.paths.state_path, payload)
 
     def record_reset(self, reset_info: dict[str, Any]) -> None:
-        payload = self.load()
-        payload.update(reset_info)
-        payload["updated_at"] = utc_now_iso()
-        self.save(payload)
+        self.paths.ensure()
+        with _file_lock(self.paths.state_path):
+            payload = self.load()
+            payload.update(reset_info)
+            payload["updated_at"] = utc_now_iso()
+            self.save(payload)
 
     def record_estimated_reset(
         self, window_started_at: str, next_estimated_reset_at: str
     ) -> None:
-        payload = self.load()
-        payload["last_estimated_window_started_at"] = window_started_at
-        payload["next_estimated_reset_at"] = next_estimated_reset_at
-        payload["estimated_reset_source"] = "scheduler-success"
-        payload["estimated_reset_confidence"] = "estimated"
-        payload["updated_at"] = utc_now_iso()
-        self.save(payload)
+        self.paths.ensure()
+        with _file_lock(self.paths.state_path):
+            payload = self.load()
+            payload["last_estimated_window_started_at"] = window_started_at
+            payload["next_estimated_reset_at"] = next_estimated_reset_at
+            payload["estimated_reset_source"] = "scheduler-success"
+            payload["estimated_reset_confidence"] = "estimated"
+            payload["updated_at"] = utc_now_iso()
+            self.save(payload)
 
     def record_rate_limits(self, rate_limits: dict[str, Any]) -> None:
-        payload = self.load()
-        updated_at = utc_now_iso()
-        payload["rate_limits"] = rate_limits
-        payload["rate_limits_updated_at"] = updated_at
-        payload["updated_at"] = updated_at
+        self.paths.ensure()
+        with _file_lock(self.paths.state_path):
+            payload = self.load()
+            updated_at = utc_now_iso()
+            payload["rate_limits"] = rate_limits
+            payload["rate_limits_updated_at"] = updated_at
+            payload["updated_at"] = updated_at
 
-        five_hour = rate_limits.get("five_hour")
-        if isinstance(five_hour, dict) and five_hour.get("resets_at_iso"):
-            payload["next_reset_at"] = five_hour["resets_at_iso"]
-            payload["reset_source"] = "claude-code-statusline"
+            five_hour = rate_limits.get("five_hour")
+            if isinstance(five_hour, dict) and five_hour.get("resets_at_iso"):
+                payload["next_reset_at"] = five_hour["resets_at_iso"]
+                payload["reset_source"] = "claude-code-statusline"
 
-        self.save(payload)
+            self.save(payload)
 
     def record_codex_rate_limits(self, fields: dict[str, Any]) -> None:
-        payload = self.load()
-        updated_at = utc_now_iso()
-        payload.update(fields)
-        payload["codex_rate_limits_updated_at"] = updated_at
-        payload["updated_at"] = updated_at
-        self.save(payload)
+        self.paths.ensure()
+        with _file_lock(self.paths.state_path):
+            payload = self.load()
+            updated_at = utc_now_iso()
+            payload.update(fields)
+            payload["codex_rate_limits_updated_at"] = updated_at
+            payload["updated_at"] = updated_at
+            self.save(payload)
