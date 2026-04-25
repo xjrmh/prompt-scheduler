@@ -173,6 +173,28 @@ class CliTests(unittest.TestCase):
             self.assertNotEqual(code, 0)
             self.assertIn("Codex", err.getvalue())
 
+    def test_window_start_at_reset_errors_helpfully_when_reset_is_in_past(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = AppPaths(root / "state", root / "agents")
+            stale = (datetime.now().astimezone() - timedelta(hours=1)).isoformat()
+            StateStore(paths).save({"next_reset_at": stale})
+            err = StringIO()
+            with patch.dict("os.environ", self._env(root)), redirect_stderr(err):
+                code = main(
+                    [
+                        "window",
+                        "start-at-reset",
+                        "--cwd",
+                        tmp,
+                        "--dry-run",
+                    ]
+                )
+            self.assertNotEqual(code, 0)
+            message = err.getvalue()
+            self.assertIn("already passed", message)
+            self.assertIn("start-now", message)
+
     def test_window_start_at_reset_dedups_same_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

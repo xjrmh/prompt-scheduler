@@ -58,7 +58,7 @@ def parse_once(value: str, now: datetime | None = None) -> dict[str, Any]:
     except ValueError as exc:
         raise ScheduleError("one-time schedule must use YYYY-MM-DD HH:MM") from exc
     run_at = run_at.replace(tzinfo=now.tzinfo)
-    if run_at <= now:
+    if run_at < now:
         raise ScheduleError("one-time schedule must be in the future")
     return {"type": "once", "run_at": run_at.isoformat()}
 

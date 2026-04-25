@@ -359,6 +359,92 @@ printf 'Codex OK\\n' > "$output"
             self.assertIn("Codex: Codex OK", updated["last_response_summary"])
             self.assertIn("Claude Code: Claude OK", updated["last_response_summary"])
 
+    def test_both_provider_records_separate_resets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = make_paths(tmp)
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            # Claude reports a reset at 5:00 PM, Codex reports a reset at 9:00 AM.
+            # Each should land in its own provider-specific state key.
+            fake_claude = write_fake_claude(
+                bin_dir,
+                """
+if [ "$1" = "auth" ]; then
+  echo '{"loggedIn":true,"authMethod":"claude.ai"}'
+  exit 0
+fi
+echo 'Claude usage limit reached. Resets at 5:00 PM.' >&2
+exit 1
+""",
+            )
+            fake_codex = write_fake_codex(
+                bin_dir,
+                """
+if [ "$1" = "login" ]; then
+  echo 'Logged in using ChatGPT'
+  exit 0
+fi
+echo 'Codex usage limit exceeded. Resets at 9:00 AM.' >&2
+exit 1
+""",
+            )
+            job = make_job(tmp)
+            job["provider"] = "both"
+            JobStore(paths).add(job)
+
+            with patch.dict(os.environ, {"CODEX_HOME": str(Path(tmp) / "fake-codex-home")}):
+                run_job(
+                    job["id"],
+                    paths=paths,
+                    claude_bin=str(fake_claude),
+                    codex_bin=str(fake_codex),
+                    cleanup_launchd=False,
+                )
+
+            state = StateStore(paths).load()
+            self.assertIn("next_reset_at", state)
+            self.assertIn("codex_next_reset_at", state)
+            self.assertNotEqual(
+                state["next_reset_at"],
+                state["codex_next_reset_at"],
+                "Codex reset must not clobber the Claude reset key",
+            )
+            # 17:00 (PM) is later than 09:00 (AM) on the same day.
+            self.assertIn("17:00", state["next_reset_at"])
+            self.assertIn("09:00", state["codex_next_reset_at"])
+
+    def test_codex_only_run_records_codex_reset_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = make_paths(tmp)
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            fake_codex = write_fake_codex(
+                bin_dir,
+                """
+if [ "$1" = "login" ]; then
+  echo 'Logged in using ChatGPT'
+  exit 0
+fi
+echo 'Codex usage limit exceeded. Resets at 5:00 PM.' >&2
+exit 1
+""",
+            )
+            job = make_job(tmp)
+            job["provider"] = "codex"
+            JobStore(paths).add(job)
+
+            with patch.dict(os.environ, {"CODEX_HOME": str(Path(tmp) / "fake-codex-home")}):
+                run_job(
+                    job["id"],
+                    paths=paths,
+                    codex_bin=str(fake_codex),
+                    cleanup_launchd=False,
+                )
+
+            state = StateStore(paths).load()
+            self.assertIn("codex_next_reset_at", state)
+            self.assertNotIn("next_reset_at", state)
+
     def test_usage_limit_records_reset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths = make_paths(tmp)

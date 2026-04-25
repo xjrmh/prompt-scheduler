@@ -1391,7 +1391,13 @@ def command_status(paths: AppPaths, *, json_output: bool = False) -> int:
         print(f"{label}: {'OK ' + path if path else 'missing'}")
         print(f"{label} login: {_auth_check_detail(status)}")
     print(f"Active provider: {payload['active_provider_label']}")
-    print(f"Next observed reset: {state.get('next_reset_at', 'unknown')}")
+    claude_reset = state.get("next_reset_at")
+    codex_reset = state.get("codex_next_reset_at")
+    if claude_reset and codex_reset and claude_reset != codex_reset:
+        print(f"Next observed Claude reset: {claude_reset}")
+        print(f"Next observed Codex reset: {codex_reset}")
+    else:
+        print(f"Next observed reset: {claude_reset or codex_reset or 'unknown'}")
     print(f"Next estimated reset: {state.get('next_estimated_reset_at', 'unknown')}")
     print(f"Jobs: {len(jobs)}")
     if jobs:
@@ -1454,11 +1460,18 @@ def window_start_at_reset(args: argparse.Namespace, paths: AppPaths) -> int:
         raise ValueError(
             f"no observed {provider_label(provider)} reset time is stored"
         )
+    now = datetime.now().astimezone()
     target = (
         datetime.fromisoformat(reset_at) + timedelta(minutes=args.buffer_minutes)
     ).astimezone()
+    if target <= now:
+        raise ValueError(
+            f"stored {provider_label(provider)} reset {reset_at} has already "
+            f"passed; run `prompt-scheduler start-now --provider {provider}` "
+            "to begin a session immediately."
+        )
     schedule_value = target.strftime("%Y-%m-%d %H:%M")
-    schedule = parse_once(schedule_value, now=datetime.now().astimezone())
+    schedule = parse_once(schedule_value, now=now)
     job = _build_job(
         "start-window-at-reset",
         args.cwd,

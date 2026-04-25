@@ -275,6 +275,31 @@ def _refresh_codex_rate_limits(paths: AppPaths) -> None:
     )
 
 
+_CODEX_RESET_KEY_MAP = {
+    "next_reset_at": "codex_next_reset_at",
+    "source": "codex_reset_source",
+    "confidence": "codex_reset_confidence",
+    "last_limit_message": "codex_last_limit_message",
+}
+
+
+def _record_provider_reset(
+    paths: AppPaths, provider: str, reset_info: dict[str, Any]
+) -> None:
+    # Codex resets are stored under codex_-prefixed keys so they don't clobber
+    # the Claude-side keys read by cli._reset_for_provider when both providers
+    # report a reset on the same `--provider both` run.
+    if provider == CODEX:
+        namespaced = {
+            _CODEX_RESET_KEY_MAP.get(key, f"codex_{key}"): value
+            for key, value in reset_info.items()
+            if value is not None
+        }
+        StateStore(paths).record_reset(namespaced)
+        return
+    StateStore(paths).record_reset(reset_info)
+
+
 def _job_provider_selection(job: dict[str, Any]) -> str:
     return normalize_provider_selection(job.get("provider"), default=CLAUDE)
 
@@ -575,7 +600,7 @@ def _execute_job(
             reset_info = parse_reset_time(combined)
             status = _status_from_result(completed.returncode, combined)
             if reset_info:
-                StateStore(paths).record_reset(reset_info)
+                _record_provider_reset(paths, provider, reset_info)
             elif status == "success" and provider == CLAUDE:
                 _record_success_estimate(paths, started_at)
             if provider == CODEX:
@@ -732,10 +757,7 @@ def _execute_multi_provider_job(
             response_summary = _aggregate_response_summary(results)
             stdout = _aggregate_result_text(results)
             stderr = _aggregate_error_text(results)
-            reset_info = next(
-                (result.reset_info for result in results if result.reset_info),
-                None,
-            )
+            reset_info = _pick_later_reset_info(results)
             message = _aggregate_message(results, status)
 
             _write_log(
@@ -787,6 +809,29 @@ def _execute_multi_provider_job(
             message="job is already running",
             provider=provider,
         )
+
+
+def _pick_later_reset_info(results: list[RunResult]) -> dict[str, Any] | None:
+    candidates = [r.reset_info for r in results if r.reset_info]
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    def reset_at(info: dict[str, Any]) -> datetime | None:
+        value = info.get("next_reset_at")
+        if not isinstance(value, str):
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
+    parsed = [(reset_at(info), info) for info in candidates]
+    valid = [item for item in parsed if item[0] is not None]
+    if not valid:
+        return candidates[0]
+    return max(valid, key=lambda item: item[0])[1]
 
 
 def _aggregate_status(results: list[RunResult]) -> str:

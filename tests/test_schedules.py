@@ -23,6 +23,12 @@ class ScheduleTests(unittest.TestCase):
         with self.assertRaises(ScheduleError):
             parse_once("2026-04-24 07:59", now=now)
 
+    def test_parse_once_accepts_exact_now(self) -> None:
+        now = datetime(2026, 4, 24, 8, 0, tzinfo=timezone.utc)
+        schedule = parse_once("2026-04-24 08:00", now=now)
+        self.assertEqual(schedule["type"], "once")
+        self.assertIn("2026-04-24T08:00:00", schedule["run_at"])
+
     def test_parse_daily(self) -> None:
         self.assertEqual(parse_daily("09:30"), {"type": "daily", "time": "09:30"})
 
