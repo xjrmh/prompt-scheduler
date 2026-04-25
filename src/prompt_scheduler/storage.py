@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .paths import AppPaths
 
@@ -13,20 +16,52 @@ def utc_now_iso() -> str:
     return datetime.now().astimezone().isoformat()
 
 
+@contextlib.contextmanager
+def _file_lock(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
     if not path.exists():
         return default
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except json.JSONDecodeError:
+        # Quarantine the corrupt file so the user can recover it manually,
+        # then continue with defaults instead of crashing every command.
+        backup = path.with_suffix(path.suffix + ".corrupt")
+        with contextlib.suppress(OSError):
+            os.replace(path, backup)
+        return default
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    os.replace(tmp_path, path)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 class JobStore:
@@ -50,33 +85,39 @@ class JobStore:
         return None
 
     def add(self, job: dict[str, Any]) -> None:
-        payload = self.load()
-        payload["jobs"].append(job)
-        self.save(payload)
+        self.paths.ensure()
+        with _file_lock(self.paths.jobs_path):
+            payload = self.load()
+            payload["jobs"].append(job)
+            self.save(payload)
 
     def update(self, job: dict[str, Any]) -> None:
-        payload = self.load()
-        for index, existing in enumerate(payload["jobs"]):
-            if existing.get("id") == job.get("id"):
-                job["updated_at"] = utc_now_iso()
-                payload["jobs"][index] = job
-                self.save(payload)
-                return
-        raise KeyError(f"unknown job: {job.get('id')}")
+        self.paths.ensure()
+        with _file_lock(self.paths.jobs_path):
+            payload = self.load()
+            for index, existing in enumerate(payload["jobs"]):
+                if existing.get("id") == job.get("id"):
+                    job["updated_at"] = utc_now_iso()
+                    payload["jobs"][index] = job
+                    self.save(payload)
+                    return
+            raise KeyError(f"unknown job: {job.get('id')}")
 
     def remove(self, job_id: str) -> dict[str, Any] | None:
-        payload = self.load()
-        kept = []
-        removed = None
-        for job in payload["jobs"]:
-            if job.get("id") == job_id:
-                removed = job
-            else:
-                kept.append(job)
-        if removed is not None:
-            payload["jobs"] = kept
-            self.save(payload)
-        return removed
+        self.paths.ensure()
+        with _file_lock(self.paths.jobs_path):
+            payload = self.load()
+            kept = []
+            removed = None
+            for job in payload["jobs"]:
+                if job.get("id") == job_id:
+                    removed = job
+                else:
+                    kept.append(job)
+            if removed is not None:
+                payload["jobs"] = kept
+                self.save(payload)
+            return removed
 
 
 class StateStore:
